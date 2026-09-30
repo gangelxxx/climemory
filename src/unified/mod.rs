@@ -1,5 +1,6 @@
 //! Unified derived memory. Originals remain read-only; all writes are operational state.
 mod claims;
+pub(crate) mod docs;
 mod evidence_aliases;
 mod evidence_first;
 mod followup;
@@ -35,6 +36,7 @@ pub(crate) fn hook_revision(project: &Project) -> Result<String> {
     Ok(digest(serde_json::to_vec(&(
         index::sources(project)?,
         &project.config,
+        docs::revision(project)?,
         crate::build_info::BINARY_VERSION,
     ))?))
 }
@@ -769,7 +771,7 @@ fn chat_with_search(
     let previous = read_json::<Index>(&checked(project, "index.json")?)
         .ok()
         .flatten();
-    let mut index = index::build(source_snapshot.clone(), previous.as_ref())?;
+    let mut index = index::for_search(project, source_snapshot.clone(), previous.as_ref())?;
     if let Some(root) = index.threads.iter_mut().find(|t| t.id == "cm-routing-root") {
         root.agent = project
             .config
@@ -1375,11 +1377,6 @@ fn chat_with_search(
             t.elements.retain(|old| old.id != value.id);
             t.elements.push(value);
         }
-        t.passport.terms.extend(index::terms(&format!(
-            "{} {}",
-            s.summary,
-            s.questions.join(" ")
-        )));
         t.passport.questions = s.questions.clone();
         if t.passport.reviewed_revision.as_ref() != Some(&index.revision) {
             t.passport.checked_candidates.clear();
@@ -1417,7 +1414,6 @@ fn chat_with_search(
             confirmed: true,
         });
     }
-    index::apply_groups(&mut index, &selections)?;
     write_json(project, "index.json", &index)?;
     let mut result = response(
         &index,

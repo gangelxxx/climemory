@@ -20,7 +20,7 @@ fn fid(n: usize) -> String {
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("memory/docs")).unwrap();
-    fs::write(dir.path().join("memory/config.json"),json!({"memory":{"unified":{"concurrency":1},"documents_agent":"cheap","chat_agent":"cheap","verification_agent":"cheap","timeout_seconds":20,"max_steps":12,"agent_retries":{"max_attempts":1}},"agent":{"profiles":{"cheap":{"provider":"codex","model":"test-model","reasoning_effort":"low"}}}}).to_string()).unwrap();
+    fs::write(dir.path().join("memory/config.json"),json!({"memory":{"documents_as_threads":true,"unified":{"concurrency":1},"documents_agent":"cheap","chat_agent":"cheap","verification_agent":"cheap","timeout_seconds":20,"max_steps":12,"agent_retries":{"max_attempts":1}},"agent":{"profiles":{"cheap":{"provider":"codex","model":"test-model","reasoning_effort":"low"}}}}).to_string()).unwrap();
     fs::write(
         dir.path().join("memory/docs/ui.md"),
         "Buttons blue.\nDeletion buttons red.",
@@ -75,7 +75,45 @@ fn run(root: &Path, msg: &str) -> Output {
         .output()
         .unwrap()
 }
+// Hierarchy fixtures explicitly prepare document threads before exercising retrieval.
+fn prepare_documents(root: &Path) {
+    fn has_large_documents(path: &Path) -> bool {
+        fs::read_dir(path).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    has_large_documents(&path)
+                } else {
+                    fs::metadata(path).is_ok_and(|meta| meta.len() > 2048)
+                }
+            })
+        })
+    }
+    if !has_large_documents(&root.join("memory/docs")) {
+        return;
+    }
+    let config: Value =
+        serde_json::from_slice(&fs::read(root.join("memory/config.json")).unwrap()).unwrap();
+    if config["memory"]["documents_as_threads"] != true {
+        return;
+    }
+    let script = root.join("docs-scenario.json");
+    fs::write(&script, json!({"state_file":root.join("docs-calls.json"),"calls":[],"operation_calls":{"docs_build":{"final_message":json!({"summary":"","groups":[]}).to_string(),"expect_no_native_tools":true,"expect_output_schema":true}}}).to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cm"))
+        .current_dir(root)
+        .args(["docs", "build"])
+        .env("CM_CODEX_EXE", env!("CARGO_BIN_EXE_cm"))
+        .env("CM_FAKE_CODEX_SCENARIO", &script)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
 fn prepare_plan(root: &Path, msg: &str) {
+    prepare_documents(root);
     if msg.starts_with("@context:") && msg.ends_with(" @details") {
         return;
     }
@@ -1354,7 +1392,7 @@ fn verifier_recovered_originals_are_available_to_cached_followup() {
 }
 
 #[test]
-fn semantic_partition_preserves_originals_and_repeat_cache() {
+fn query_partition_is_ignored_and_preserves_originals_and_repeat_cache() {
     let d = fixture();
     let text=hierarchy_document("Buttons blue.\nButtons red on deletion.\nButtons disabled grey.\nButtons have labels.\nKeyboard operates controls.\nFocus is visible.\nTab moves focus.\nEscape cancels.");
     fs::write(d.path().join("memory/docs/ui.md"), &text).unwrap();
@@ -1369,7 +1407,7 @@ fn semantic_partition_preserves_originals_and_repeat_cache() {
         &fs::read(d.path().join("memory/runtime/unified/index.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(index["threads"].as_array().unwrap().len(), 3);
+    assert_eq!(index["threads"].as_array().unwrap().len(), 1);
     assert_eq!(
         index["threads"]
             .as_array()
@@ -1803,6 +1841,129 @@ fn empty_router_reuses_one_child_and_still_grounds_original_evidence() {
 }
 
 #[test]
+fn documents_are_whole_by_default_and_model_cannot_split_them() {
+    let d = fixture();
+    let path = d.path().join("memory/config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["memory"]
+        .as_object_mut()
+        .unwrap()
+        .remove("documents_as_threads");
+    fs::write(path, config.to_string()).unwrap();
+    let original = format!(
+        "# Intro\n{}\n# Checks\nRun checker.\n# More\nOne.\nTwo.\nThree.\n",
+        "Original text. ".repeat(1000)
+    );
+    fs::write(d.path().join("memory/docs/ui.md"), &original).unwrap();
+    let mut selection = selected(vec![fid(4)]);
+    selection["groups"] = json!([
+        {"title":"First","fragments":(1..=4).map(fid).collect::<Vec<_>>()},
+        {"title":"Second","fragments":(5..=8).map(fid).collect::<Vec<_>>()}
+    ]);
+    scenario(d.path(), vec![selection, assembled(vec![fid(4)])]);
+    let result = answer(d.path(), "Checks?");
+    assert_eq!(result["status"], "complete", "{result}");
+    assert_eq!(result["evidence"][0]["line"], 4);
+    assert_eq!(result["evidence"][0]["quote"], "Run checker.");
+    let index: Value = serde_json::from_slice(
+        &fs::read(d.path().join("memory/runtime/unified/index.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(index["documents_as_threads"], false);
+    assert_eq!(index["threads"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        index["threads"][0]["fragments"].as_array().unwrap().len(),
+        8
+    );
+    assert_eq!(
+        fs::read_to_string(d.path().join("memory/docs/ui.md")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn authored_relative_link_routes_to_original_in_another_document() {
+    let d = fixture();
+    fs::write(
+        d.path().join("memory/docs/ui.md"),
+        "Documentation changes follow [the procedure](./checks.md#validation).\n",
+    )
+    .unwrap();
+    fs::write(
+        d.path().join("memory/docs/checks.md"),
+        "Run python tools/docs/check_docs.py.\n",
+    )
+    .unwrap();
+    let target = format!("doc-{}", hash("memory/docs/checks.md"));
+    let evidence = vec![format!("{target}:L1")];
+    scenario(
+        d.path(),
+        vec![
+            route(vec![target]),
+            selected(evidence.clone()),
+            branch(evidence.clone()),
+            assembled(evidence),
+        ],
+    );
+    let result = answer(d.path(), "Documentation changes?");
+    assert_eq!(result["status"], "complete", "{result}");
+    assert!(result
+        .to_string()
+        .contains("python tools/docs/check_docs.py"));
+    assert_eq!(result["evidence"][0]["source"], "memory/docs/checks.md");
+}
+
+#[test]
+fn section_seed_can_consult_a_sibling_with_different_vocabulary() {
+    let d = fixture();
+    let original = hierarchy_document("# Before editing\nDocumentation changes begin here.\n# Completion\nRun python tools/docs/check_docs.py.");
+    fs::write(d.path().join("memory/docs/ui.md"), &original).unwrap();
+    let sibling = section(&source(), "Completion");
+    let evidence = vec![fid(4)];
+    let values = vec![
+        route(vec![sibling]),
+        selected(evidence.clone()),
+        branch(evidence.clone()),
+        assembled(evidence),
+    ];
+    let calls: Vec<_> = values
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            json!({
+                "final_message":v.to_string(),
+                "save_prompt_to":d.path().join(format!("sibling-{i}.txt")),
+                "expect_no_native_tools":true
+            })
+        })
+        .collect();
+    fs::write(
+        d.path().join("scenario.json"),
+        json!({"state_file":d.path().join("calls.json"),"calls":calls}).to_string(),
+    )
+    .unwrap();
+    let result = answer(d.path(), "Documentation changes?");
+    assert_eq!(result["status"], "complete", "{result}");
+    assert!(result
+        .to_string()
+        .contains("python tools/docs/check_docs.py"));
+    let prompt = fs::read_to_string(d.path().join("sibling-0.txt")).unwrap();
+    let data: Value =
+        serde_json::from_str(prompt.lines().find(|l| l.starts_with('{')).unwrap()).unwrap();
+    assert_eq!(data["thread"]["title"], "Before editing");
+    assert_eq!(data["children"][0]["title"], "Completion");
+    assert!(!data["thread"]["fragments"]
+        .to_string()
+        .contains("check_docs.py"));
+    let child = fs::read_to_string(d.path().join("sibling-1.txt")).unwrap();
+    assert!(child.contains("Run python tools/docs/check_docs.py."));
+    assert_eq!(
+        fs::read_to_string(d.path().join("memory/docs/ui.md")).unwrap(),
+        original
+    );
+}
+
+#[test]
 fn recursive_agents_read_only_own_content_and_merge_selected_children_upward() {
     let d = fixture();
     let original=hierarchy_document("# UI\n## Settings\nGeneral settings.\n### Save\nSave green.\n### Exceptions\nDisabled Save grey.\n## Typography\nFont 16px.");
@@ -1850,7 +2011,8 @@ fn recursive_agents_read_only_own_content_and_merge_selected_children_upward() {
         .is_empty());
     assert_eq!(data(0)["children"].as_array().unwrap().len(), 1);
     assert_eq!(data(1)["children"].as_array().unwrap().len(), 2);
-    assert_eq!(data(2)["children"].as_array().unwrap().len(), 2);
+    // Immediate sibling passports are visible too, without reading their originals.
+    assert_eq!(data(2)["children"].as_array().unwrap().len(), 3);
     assert!(!prompt(0).contains("Save green."));
     assert!(!prompt(1).contains("Save green."));
     assert!(data(3)["question"]

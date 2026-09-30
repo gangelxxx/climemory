@@ -10,7 +10,7 @@ pub(super) trait SearchBackend {
 pub(super) struct Indexed;
 impl SearchBackend for Indexed {
     fn cache_key(&self) -> &str {
-        "indexed-request-roots-v4"
+        "indexed-request-roots-v9"
     }
     fn search(&self, index: &Index, query: &str) -> Vec<String> {
         index.search(query)

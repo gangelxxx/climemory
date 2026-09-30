@@ -127,7 +127,7 @@ jobs:
         env:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          package="$PWD/climemory-$VERSION.tgz"
+          package="$PWD/gangelxxx-climemory-$VERSION.tgz"
           project=$(mktemp -d)
           cd "$project"
           npm exec --yes --package="$package" -- climemory init
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: npm-package
-          path: climemory-*.tgz
+          path: gangelxxx-climemory-*.tgz
           if-no-files-found: error
       - id: registry
         run: node npm-tools/registry.cjs

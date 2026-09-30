@@ -74,6 +74,8 @@ fn public_cli_has_chat_init_help_and_experimental_session_import() {
     let help = text(&run(d.path(), &["help"]));
     assert!(help.contains("cm init"));
     assert!(help.contains("cm ingest-session"));
+    assert!(help.contains("cm docs build"));
+    assert!(help.contains("cm docs status"));
     assert!(help.contains("cm -test_providers"));
     assert!(!help.contains("cm context"));
     for args in [
@@ -97,6 +99,33 @@ fn public_cli_has_chat_init_help_and_experimental_session_import() {
         serde_json::from_slice(&fs::read(initialized.path().join("memory/config.json")).unwrap())
             .unwrap();
     assert!(config["memory"]["unified"].get("enabled").is_none());
+    assert_eq!(config["memory"]["documents_as_threads"], false);
+    let provider = &config["agent"]["providers"]["openrouter"];
+    assert_eq!(provider["adapter"], "openai-compatible");
+    assert_eq!(
+        provider["endpoint"],
+        "https://openrouter.ai/api/v1/chat/completions"
+    );
+    assert_eq!(provider["api_key_env"], "OPENROUTER_API_KEY");
+    assert_eq!(provider["allow_remote_content"], true);
+    assert_eq!(provider["response_format"], "json_schema");
+    assert_eq!(provider["max_output_tokens"], 8192);
+    assert_eq!(provider["routing"]["order"], json!(["together", "baseten"]));
+    assert_eq!(provider["routing"]["allow_fallbacks"], true);
+    assert!(provider.get("api_key").is_none());
+    for name in ["agent_low", "agent_medium", "agent_high"] {
+        let profile = &config["agent"]["profiles"][name];
+        assert_eq!(profile["provider"], "openrouter");
+        assert_eq!(profile["model"], "z-ai/glm-5.3-flash");
+        assert_eq!(profile["reasoning_effort"], "low");
+    }
+    let path = initialized.path().join("memory/config.json");
+    let mut customized = config.clone();
+    customized["agent"]["profiles"]["agent_low"]["model"] = json!("custom/model");
+    let bytes = serde_json::to_vec_pretty(&customized).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    assert!(run(initialized.path(), &["init"]).status.success());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
     assert!(config["memory"].get("documents_prefilter").is_none());
     assert!(config["memory"]["timeouts"]
         .get("coordinator_seconds")

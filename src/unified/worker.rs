@@ -6,9 +6,10 @@ pub(super) fn call(
     profile_name: &str,
     phase: &str,
     data: Value,
-    schema: Value,
+    mut schema: Value,
     deadline: Instant,
 ) -> Result<Value> {
+    bound_reference_arrays(&mut schema);
     let profile = project
         .config
         .agent
@@ -42,6 +43,66 @@ pub(super) fn call(
         return Err(AppError::new("unified worker returned unsupported outcome"));
     };
     serde_json::from_str(&summary).map_err(|e| AppError::new(format!("unified protocol: {e}")))
+}
+
+/// Reference lists are subsets of a finite catalog. Bound native generation so
+/// repeated IDs cannot consume the output budget before the JSON object closes.
+/// Use maxItems: Together's native schema decoder rejects uniqueItems.
+fn bound_reference_arrays(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("array") {
+                if let Some(count) = object
+                    .get("items")
+                    .and_then(|items| items.get("enum"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                {
+                    let limit = object
+                        .get("maxItems")
+                        .and_then(Value::as_u64)
+                        .map_or(count as u64, |limit| limit.min(count as u64));
+                    object.insert("maxItems".into(), json!(limit));
+                }
+            }
+            for child in object.values_mut() {
+                bound_reference_arrays(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                bound_reference_arrays(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod reference_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn verifier_catalogs_cannot_generate_unbounded_repeated_ids() {
+        let mut schema = json!({"type":"object","properties":{
+            "need":{"type":"array","items":{"type":"string","enum":["a","b"]}},
+            "select":{"type":"array","maxItems":1,"items":{"type":"string","enum":["1","2"]}},
+            "aspects":{"type":"array","items":{"anyOf":[{"type":"object","properties":{
+                "evidence":{"type":"array","maxItems":0,"items":{"type":"string","enum":["NO_VALID_ID"]}}
+            }}]}},
+            "gaps":strings()
+        }});
+        bound_reference_arrays(&mut schema);
+        assert_eq!(schema["properties"]["need"]["maxItems"], 2);
+        assert!(schema["properties"]["need"].get("uniqueItems").is_none());
+        assert_eq!(schema["properties"]["select"]["maxItems"], 1);
+        assert_eq!(
+            schema["properties"]["aspects"]["items"]["anyOf"][0]["properties"]["evidence"]
+                ["maxItems"],
+            0
+        );
+        assert!(schema["properties"]["gaps"].get("maxItems").is_none());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -163,33 +224,9 @@ fn normalize(
         supplied.contains(id) && index.thread(id).is_some_and(|t| t.fragments.len() <= 8)
     });
     if !s.groups.is_empty() {
-        let ids: Vec<_> = s.groups.iter().flat_map(|g| g.fragments.iter()).collect();
-        let unique: BTreeSet<_> = ids.iter().map(|id| id.as_str()).collect();
-        let valid = (2..=8).contains(&s.groups.len())
-            && t.fragments.len() >= 8
-            && index
-                .sources
-                .iter()
-                .find(|source| source.id == t.source)
-                .is_some_and(|source| source.authority == "user_document")
-            && !index
-                .threads
-                .iter()
-                .any(|child| child.parent.as_ref() == Some(&t.id))
-            && s.groups.iter().all(|g| {
-                !g.title.trim().is_empty()
-                    && g.title.chars().count() <= 160
-                    && g.fragments.len() >= 2
-                    && g.fragments.len() < t.fragments.len()
-            })
-            && ids.len() == own.len()
-            && unique.len() == own.len()
-            && unique.iter().all(|id| own.contains(*id));
-        if !valid {
-            s.groups.clear();
-            s.host_notes
-                .push("Invalid semantic partition discarded; original thread retained.".into());
-        }
+        s.groups.clear();
+        s.host_notes
+            .push("Document partitioning requires cm docs build; proposal discarded.".into());
     }
     if !s.links.is_empty() || !s.checked.is_empty() {
         s.links.clear();
@@ -400,12 +437,41 @@ pub(super) fn retrieve(
     repair: Option<&str>,
 ) -> Result<Selection> {
     let candidates = super::routing::targets(index, t);
-    let supplied = super::routing::search_passports(
+    // Keep the immediate document outline visible before following external
+    // links: a relevant completion/exception heading may share no query words.
+    let outline: Vec<_> = candidates
+        .iter()
+        .filter(|id| {
+            index.thread(id).is_some_and(|n| {
+                n.source == t.source
+                    && (n.parent.as_ref() == Some(&t.id)
+                        || (t.parent.is_some() && n.parent == t.parent))
+            })
+        })
+        .cloned()
+        .collect();
+    let mut supplied = super::routing::search_passports(
         index,
-        &candidates,
+        &outline,
         question,
         project.config.memory.unified.max_candidates,
     );
+    let remaining: Vec<_> = candidates
+        .iter()
+        .filter(|id| !supplied.contains(id))
+        .cloned()
+        .collect();
+    supplied.extend(super::routing::search_passports(
+        index,
+        &remaining,
+        question,
+        project
+            .config
+            .memory
+            .unified
+            .max_candidates
+            .saturating_sub(supplied.len()),
+    ));
     crate::statistics::event(
         "passport_candidates",
         json!({"thread":t.id,"available":candidates.len(),"selected":supplied}),
@@ -413,7 +479,7 @@ pub(super) fn retrieve(
     let passports = super::routing::passports(index, &supplied, question);
     let key = digest(serde_json::to_vec(
         &json!({"version":crate::build_info::BINARY_VERSION,"thread":t.id,"revision":index.revision,
-        "question":question,"history":history,"candidates":supplied,"config":project.config,"worker":"retrieve"}),
+        "question":question,"history":history,"candidates":supplied,"config":project.config,"worker":"retrieve-v5"}),
     )?);
     let cache = checked(project, &format!("cache/{key}.json"))?;
     if project.config.memory.cache.enabled {
@@ -445,15 +511,8 @@ pub(super) fn retrieve(
             json!({"type":"string","enum":ids})
         }
     };
-    let cohesive = index
-        .sources
-        .iter()
-        .find(|source| source.id == t.source)
-        .is_some_and(index::source_is_cohesive);
     let mut schema = selection_schema();
-    if cohesive {
-        schema["properties"]["groups"]["maxItems"] = json!(0);
-    }
+    schema["properties"]["groups"]["maxItems"] = json!(0);
     schema["properties"]["delegations"] = json!({"type":"array","items":{"type":"object","additionalProperties":false,"required":["thread","question"],"properties":{"thread":enumeration(&supplied),"question":{"type":"string","maxLength":1000}}}});
     schema["required"]
         .as_array_mut()
@@ -461,6 +520,9 @@ pub(super) fn retrieve(
         .push(json!("delegations"));
     schema["properties"]["need"]["maxItems"] = json!(project.config.memory.unified.max_candidates);
     schema["properties"]["links"]["maxItems"] = json!(0);
+    schema["properties"]["checked"]["maxItems"] = json!(0);
+    schema["properties"]["select"]["maxItems"] = json!(own.len());
+    schema["properties"]["delegations"]["maxItems"] = json!(supplied.len());
     schema["properties"]["select"]["items"] = enumeration(&local);
     schema["properties"]["groups"]["items"]["properties"]["fragments"]["items"] =
         enumeration(&local);
@@ -480,7 +542,7 @@ pub(super) fn retrieve(
             "previous_validation_error":repair,"repair_instructions":"If a previous validation error is present, return a corrected response for this same thread. Use only allowed original IDs and enum values; never invent replacements or omit required evidence to hide an error.",
             "question":question,"history":history,"thread":{"id":t.id,"title":t.title,"fragments":local_fragments,"summary":t.passport.summary},"children":passports,
             "passport_search":{"total":candidates.len(),"returned":supplied.len(),"exhaustive":supplied.len()==candidates.len(),"rule":"Children are locally ranked search results, not the entire catalog. Search omissions do not establish absence; report unresolved requested facts as gaps."},
-            "partition_rules":if cohesive { "Return groups=[]; this bounded original source is one retrieval unit." } else { "groups is optional semantic subdivision of a large leaf document thread, not only query matches. Usually return []. Only for a document leaf with >=8 original fragments and several distinct topics: partition ALL own fragment IDs into 2..8 groups, each >=2 fragments and smaller than the whole thread. No duplicates or omissions. Use short topic titles, preserve original IDs. Do not partition advisory memory or existing parent threads. Never invent content." },
+            "partition_rules":"Return groups=[]; document partitioning is only performed by cm docs build.",
             "has_children":index.threads.iter().any(|child| child.parent.as_ref()==Some(&t.id)),
             "fragment_reference_rules":"Fragment IDs are short local strings such as \"1\" and \"2\", scoped to THIS call. Copy them into select, elements.evidence and groups.fragments. Do not reconstruct document IDs or line addresses. The host restores canonical references. Thread IDs in need/delegations are unchanged.",
             "ownership_rules":"select and elements.evidence MUST use ONLY thread.fragments IDs. Need and delegations.thread use child/linked THREAD IDs. Passports are not factual evidence. Return links=[] and checked=[]: cross-thread confirmation requires original evidence from both owners, which is not supplied at this routing stage.",

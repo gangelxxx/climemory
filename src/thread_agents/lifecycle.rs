@@ -74,6 +74,7 @@ pub(crate) fn create_memory(parsed: &Parsed, project: &Project) -> Result<()> {
         revision: 1,
         last_dialogue: None,
         updated: iso_now(),
+        document: None,
     };
     let path = binding_path(project, &doc.meta.id)?;
     project.persist(&doc)?;

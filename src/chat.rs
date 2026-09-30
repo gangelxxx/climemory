@@ -30,12 +30,158 @@ pub(crate) fn project_root() -> Result<PathBuf> {
     ))
 }
 fn help() -> Result<()> {
-    let output = format!( "CM {} — {}\n\ncm\ncm \"<message>\"\ncm init\ncm help\ncm ingest-session\ncm hooks install codex\ncm hooks uninstall codex\ncm hooks status\ncm hooks drain\ncm -test_providers\ncm feedback \"<text>\"\n\n{}\n{}\n{}\n{}", crate::build_info::BINARY_VERSION,
+    let commands = [
+        (
+            "cm",
+            crate::ui::tr(
+                "Read questions interactively or from stdin; EOF exits",
+                "Ввод вопросов интерактивно или через stdin; EOF завершает ввод",
+                "交互式或从 stdin 读取问题；EOF 退出",
+            ),
+        ),
+        (
+            "cm \"<message>\"",
+            crate::ui::tr(
+                "Ask about project memory and exit; quote the entire message",
+                "Задать вопрос по памяти проекта и выйти; всё сообщение в кавычках",
+                "查询项目记忆后退出；请将完整消息放在引号中",
+            ),
+        ),
+        (
+            "cm \"@context:ID <follow-up>\"",
+            crate::ui::tr(
+                "Continue the returned context_session",
+                "Продолжить тему по полученному context_session",
+                "继续返回的 context_session 主题",
+            ),
+        ),
+        (
+            "cm \"@context:ID @details\"",
+            crate::ui::tr(
+                "Expand saved evidence and interpretations for the topic",
+                "Показать сохранённые источники и интерпретации темы",
+                "展开主题保存的证据和解释",
+            ),
+        ),
+        (
+            "cm init",
+            crate::ui::tr(
+                "Initialize memory, project MCP and instructions",
+                "Инициализировать память, MCP и инструкции проекта",
+                "初始化记忆、项目 MCP 和指令",
+            ),
+        ),
+        (
+            "cm help",
+            crate::ui::tr(
+                "Show this help; aliases: --help, -h",
+                "Показать эту справку; также --help, -h",
+                "显示此帮助；别名：--help、-h",
+            ),
+        ),
+        (
+            "cm --version",
+            crate::ui::tr(
+                "Print the executable version",
+                "Показать версию программы",
+                "显示程序版本",
+            ),
+        ),
+        (
+            "cm ingest-session",
+            crate::ui::tr(
+                "Import new events from the identified Codex session",
+                "Импортировать новые события определённой сессии Codex",
+                "导入所识别 Codex 会话的新事件",
+            ),
+        ),
+        (
+            "cm docs build [--dry-run]",
+            crate::ui::tr(
+                "Prepare document threads; --dry-run previews files without model calls",
+                "Подготовить ветки документов; --dry-run покажет файлы без вызовов модели",
+                "准备文档线程；--dry-run 预览文件，不调用模型",
+            ),
+        ),
+        (
+            "cm docs status",
+            crate::ui::tr(
+                "Compare documents with the last complete build",
+                "Сравнить документы с последней полной сборкой",
+                "将文档与上次完整构建比较",
+            ),
+        ),
+        (
+            "cm -test_providers",
+            crate::ui::tr(
+                "Test model profiles with real calls; may consume tokens",
+                "Проверить профили моделей реальными вызовами; расходует токены",
+                "通过真实调用测试模型配置；可能消耗令牌",
+            ),
+        ),
+        (
+            "cm feedback \"<text>\"",
+            crate::ui::tr(
+                "Save feedback without a model call",
+                "Сохранить обратную связь без вызова модели",
+                "保存反馈，不调用模型",
+            ),
+        ),
+        (
+            "cm hooks install codex",
+            crate::ui::tr(
+                "Install automatic history/context hooks",
+                "Установить автоматические хуки истории и контекста",
+                "安装自动历史和上下文钩子",
+            ),
+        ),
+        (
+            "cm hooks uninstall codex",
+            crate::ui::tr(
+                "Remove CM hooks, preserving unrelated hooks",
+                "Удалить хуки CM, сохранив остальные",
+                "移除 CM 钩子，保留其他钩子",
+            ),
+        ),
+        (
+            "cm hooks status",
+            crate::ui::tr(
+                "Show queued session count and hook runtime directory",
+                "Показать число сессий в очереди и рабочий каталог хуков",
+                "显示排队会话数和钩子运行目录",
+            ),
+        ),
+        (
+            "cm hooks drain",
+            crate::ui::tr(
+                "Process queued imports in the foreground",
+                "Обработать очередь импорта в текущем процессе",
+                "在前台处理导入队列",
+            ),
+        ),
+        (
+            "cm --mcp",
+            crate::ui::tr(
+                "Run the native stdio MCP server",
+                "Запустить MCP-сервер через stdio",
+                "运行原生 stdio MCP 服务器",
+            ),
+        ),
+    ];
+    let commands = commands
+        .iter()
+        .map(|(command, description)| format!("  {command}\n    {description}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = format!( "CM {} — {}\n\n{commands}\n\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n  cm \"What requirements are unresolved?\" -pretty -en\n  cm help -pretty -ru", crate::build_info::BINARY_VERSION,
         crate::ui::tr("Read-only memory chat", "Чат памяти: чтение", "只读记忆聊天"),
         crate::ui::tr("Presentation: -pretty (alias --pretty). Language: -en (default), -ru, -zh; language flags require -pretty.", "Отображение: -pretty (или --pretty). Язык: -en (по умолчанию), -ru, -zh; для языка нужен -pretty.", "显示：-pretty（别名 --pretty）。语言：-en（默认）、-ru、-zh；语言选项需要 -pretty。"),
-        crate::ui::tr("init initializes memory; ingest-session imports new Codex events; -test_providers tests configured model profiles.", "init создаёт память; ingest-session импортирует новые события Codex; -test_providers проверяет профили моделей.", "init 初始化记忆；ingest-session 导入新的 Codex 事件；-test_providers 测试模型配置。"),
+        crate::ui::tr("Do not add presentation flags to hooks, --mcp or --version.", "Не добавляйте флаги отображения к hooks, --mcp и --version.", "不要为 hooks、--mcp 或 --version 添加显示选项。"),
         crate::ui::tr("Settings: memory/config.json. Statistics: memory.statistics.enabled. Continue a returned topic using cm \"@context:ID <follow-up>\". Source documents and source threads remain read-only.", "Настройки: memory/config.json. Статистика: memory.statistics.enabled. Продолжайте тему через cm \"@context:ID <уточнение>\". Исходные документы и нити доступны только для чтения.", "设置：memory/config.json。统计：memory.statistics.enabled。使用 cm \"@context:ID <追问>\" 继续主题。源文档和源线程保持只读。"),
-        crate::ui::tr("ingest-session uses CODEX_THREAD_ID (or CODEX_SESSION_ID) and CODEX_HOME. JSON keys and raw technical diagnostics are not translated.", "ingest-session использует CODEX_THREAD_ID (или CODEX_SESSION_ID) и CODEX_HOME. Ключи JSON и исходная техническая диагностика не переводятся.", "ingest-session 使用 CODEX_THREAD_ID（或 CODEX_SESSION_ID）及 CODEX_HOME。JSON 键名和原始技术诊断保持不变。"));
+        crate::ui::tr("ingest-session uses CODEX_THREAD_ID (or CODEX_SESSION_ID) and CODEX_HOME. JSON keys and raw technical diagnostics are not translated.", "ingest-session использует CODEX_THREAD_ID (или CODEX_SESSION_ID) и CODEX_HOME. Ключи JSON и исходная техническая диагностика не переводятся.", "ingest-session 使用 CODEX_THREAD_ID（或 CODEX_SESSION_ID）及 CODEX_HOME。JSON 键名和原始技术诊断保持不变。"),
+        crate::ui::tr("Each new question starts an independent topic; use @context:ID to continue one. Questions accept 1–8000 characters.", "Каждый новый вопрос начинает отдельную тему; для продолжения используйте @context:ID. Длина вопроса: 1–8000 символов.", "每个新问题开启独立主题；使用 @context:ID 继续主题。问题长度为 1–8000 个字符。"),
+        crate::ui::tr("No public context, ask, reply, report or code subcommands. ask is an MCP tool.", "Подкоманд context, ask, reply, report и code нет. ask — инструмент MCP.", "没有公开的 context、ask、reply、report 或 code 子命令。ask 是 MCP 工具。"),
+        crate::ui::tr("Examples (PowerShell: use .\\cm.exe; Unix: ./cm):", "Примеры (PowerShell: используйте .\\cm.exe; Unix: ./cm):", "示例（PowerShell 使用 .\\cm.exe；Unix 使用 ./cm）："));
     crate::statistics::output(&output);
     writeln!(io::stdout().lock(), "{output}")?;
     Ok(())
@@ -81,6 +227,9 @@ fn initialize() -> Result<()> {
     Ok(())
 }
 pub(crate) fn run(args: &[String]) -> Result<()> {
+    if args.len() > 1 && args.first().is_some_and(|arg| arg == "docs") {
+        return crate::unified::docs::run(&args[1..]);
+    }
     if args.len() == 2 && args[0] == "feedback" {
         return crate::feedback::command(&args[1]);
     }
@@ -135,10 +284,8 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                     }
                     chat(text.trim())
                 };
-                match result {
-                    Ok(answer) => println!("{answer}"),
-                    Err(error) => return Err(error),
-                }
+                let answer = result?;
+                println!("{answer}");
             }
             Ok(())
         }

@@ -1,6 +1,6 @@
 {
-  "name": "climemory",
-  "version": "2.62.0",
+  "name": "@gangelxxx/climemory",
+  "version": "2.62.1",
   "description": "Install climemory project memory for coding agents",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/gangelxxx/climemory.git" },
@@ -8,7 +8,7 @@
   "bin": {
     "climemory": "bin/climemory.cjs"
   },
-  "files": ["bin/", "NPM-RELEASE.md"],
+  "files": ["bin/"],
   "engines": { "node": ">=22.14.0" },
   "publishConfig": { "access": "public" },
   "scripts": {

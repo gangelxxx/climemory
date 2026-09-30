@@ -32,6 +32,36 @@ const COMPACT_MEMORY_LIMIT: usize = 1200;
 const MAX_MESSAGE: usize = 16000;
 const MAX_DEPTH: usize = 8;
 
+/// Native binding for a generated document thread. The builder owns publication
+/// under the dialogue/source locks; deterministic bytes allow freshness checks.
+pub(crate) fn document_binding(
+    project: &Project,
+    id: &str,
+    parent: Option<String>,
+    memory: String,
+    updated: String,
+    origin: (String, String),
+    revision: u64,
+) -> Result<(PathBuf, Vec<u8>)> {
+    let binding = Binding {
+        format: BINDING_FORMAT.into(),
+        thread_id: id.into(),
+        agent: Some(project.config.memory.documents_agent.clone()),
+        provider: None,
+        model: None,
+        parent,
+        memory,
+        revision,
+        last_dialogue: None,
+        updated,
+        document: Some(origin),
+    };
+    Ok((
+        binding_path(project, id)?,
+        serde_json::to_vec_pretty(&binding)?,
+    ))
+}
+
 /// Called under the dialogue and source locks by the session importer.
 /// IDs belong to its own namespace; replaying a prepared commit is idempotent.
 pub(crate) fn persist_session_binding(
@@ -62,6 +92,7 @@ pub(crate) fn persist_session_binding(
         revision,
         last_dialogue: None,
         updated,
+        document: None,
     };
     write_json(&binding_path(project, id)?, &binding)
 }
@@ -83,6 +114,10 @@ pub(super) struct Binding {
     revision: u64,
     last_dialogue: Option<String>,
     updated: String,
+    /// Source path and prepared node identity; generated documents are retrieved
+    /// from original evidence, not again as advisory binding summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    document: Option<(String, String)>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -433,17 +468,38 @@ pub fn list(project: &Project) -> Result<Vec<Value>> {
 }
 
 /// Read-only source inventory for the unified derived index.
-pub(crate) fn source_inventory(project: &Project) -> Result<Vec<Value>> {
+pub(crate) fn source_inventory(
+    project: &Project,
+    excluded: &BTreeSet<String>,
+) -> Result<Vec<Value>> {
     binding_ids(project)?
         .iter()
-        .map(|id| {
-            let (binding, raw) = load_binding_snapshot(project, id)?;
-            let mut record = memory_record(project, &binding)?;
-            record["revision"] = json!(crate::util::digest(&raw));
-            record["path"] = json!(format!("memory/thread-agents/{id}.json"));
-            Ok(record)
+        .filter(|id| !excluded.contains(*id))
+        .filter_map(|id| {
+            let result = (|| {
+                let (binding, raw) = load_binding_snapshot(project, id)?;
+                if binding.document.is_some() {
+                    return Ok(None);
+                }
+                let mut record = memory_record(project, &binding)?;
+                record["revision"] = json!(crate::util::digest(&raw));
+                record["path"] = json!(format!("memory/thread-agents/{id}.json"));
+                Ok(Some(record))
+            })();
+            result.transpose()
         })
         .collect()
+}
+
+pub(crate) fn document_bindings(project: &Project) -> Result<Vec<(String, String, String)>> {
+    let mut result = Vec::new();
+    for id in binding_ids(project)? {
+        let binding = load_binding(project, &id)?;
+        if let Some((source, node)) = binding.document {
+            result.push((id, source, node));
+        }
+    }
+    Ok(result)
 }
 
 fn list_memories(
@@ -616,6 +672,7 @@ fn bind(parsed: &Parsed, project: &Project, identity: &str) -> Result<Value> {
         revision: 0,
         last_dialogue: None,
         updated: iso_now(),
+        document: None,
     });
     if b.revision > 0 && b.agent.as_ref() == Some(&agent) && b.parent == parent {
         return binding_record(project, &b);

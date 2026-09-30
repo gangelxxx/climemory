@@ -69,6 +69,7 @@ fn response_content(value: &Value, adapter: AgentProviderAdapter) -> Result<Stri
         match reason.and_then(Value::as_str) {
             Some("length") => Some("finish_reason=length: output token limit reached"),
             Some("content_filter") => Some("finish_reason=content_filter: provider content filter"),
+            Some("error") => Some("finish_reason=error: upstream provider failed generation"),
             _ => None,
         }
     };
@@ -688,6 +689,21 @@ mod timeout_tests {
         .unwrap()
         .contains("upstream failed"));
         assert!(response_error(&json!({"choices":[{"message":{"content":"ok"}}]}), None).is_none());
+    }
+
+    #[test]
+    fn failed_generation_is_reported_even_with_http_success_or_partial_content() {
+        for content in [
+            Value::Null,
+            json!("{\"summary\":\"partial\",\"groups\":[]}"),
+        ] {
+            let response =
+                json!({"choices":[{"message":{"content":content},"finish_reason":"error"}]});
+            let error =
+                response_content(&response, AgentProviderAdapter::OpenaiCompatible).unwrap_err();
+            assert!(error.msg.contains("finish_reason=error"));
+            assert!(error.msg.contains("no response was applied"));
+        }
     }
 
     #[test]

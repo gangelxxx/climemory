@@ -16,6 +16,7 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct MemoryConfig {
     pub unified: UnifiedConfig,
+    pub documents_as_threads: bool,
     #[serde(skip_serializing, rename = "documents_prefilter")]
     _retired_documents_prefilter: Option<bool>,
     pub feedback: FeedbackConfig,
@@ -37,6 +38,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             unified: UnifiedConfig::default(),
+            documents_as_threads: false,
             _retired_documents_prefilter: None,
             feedback: FeedbackConfig::default(),
             timeouts: TaskTimeouts::default(),
@@ -179,7 +181,24 @@ impl Default for Config {
             agent: AgentConfig {
                 proxy: ProxyConfig::default(),
                 classifier: None,
-                providers: BTreeMap::new(),
+                providers: BTreeMap::from([(
+                    "openrouter".into(),
+                    AgentProviderConfig {
+                        adapter: Some(AgentProviderAdapter::OpenaiCompatible),
+                        endpoint: Some("https://openrouter.ai/api/v1/chat/completions".into()),
+                        allow_remote_content: true,
+                        api_key_env: Some("OPENROUTER_API_KEY".into()),
+                        max_output_tokens: Some(8192),
+                        reasoning_enabled: Some(true),
+                        response_format: Some(HttpResponseFormat::JsonSchema),
+                        routing: Some(ProviderRouting {
+                            order: Some(vec!["together".into(), "baseten".into()]),
+                            allow_fallbacks: Some(true),
+                            ..ProviderRouting::default()
+                        }),
+                        ..AgentProviderConfig::default()
+                    },
+                )]),
                 profiles: default_agent_profiles(),
             },
         }
@@ -280,23 +299,19 @@ pub struct AgentProfile {
 
 fn default_agent_profiles() -> BTreeMap<String, AgentProfile> {
     use crate::agent_provider::ModelReasoningEffort;
-    [
-        ("agent_high", ModelReasoningEffort::High),
-        ("agent_medium", ModelReasoningEffort::Medium),
-        ("agent_low", ModelReasoningEffort::Low),
-    ]
-    .into_iter()
-    .map(|(name, effort)| {
-        (
-            name.into(),
-            AgentProfile {
-                provider: "codex".into(),
-                model: Some("gpt-5.5".into()),
-                reasoning_effort: Some(effort),
-            },
-        )
-    })
-    .collect()
+    ["agent_high", "agent_medium", "agent_low"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.into(),
+                AgentProfile {
+                    provider: "openrouter".into(),
+                    model: Some("z-ai/glm-5.3-flash".into()),
+                    reasoning_effort: Some(ModelReasoningEffort::Low),
+                },
+            )
+        })
+        .collect()
 }
 
 /// OpenRouter upstream selection, forwarded as the request `provider` object.

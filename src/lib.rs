@@ -57,6 +57,10 @@ fn guard_nested_mutation_root(_parsed: &cli::Parsed, root: &Path) -> util::Resul
 pub fn main_entry(legacy: bool) {
     util::init_console_utf8();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if !legacy && args == ["--version"] {
+        println!("CM {}", build_info::BINARY_VERSION);
+        return;
+    }
     if !legacy && args == ["--mcp"] {
         if let Err(error) = mcp::run() {
             eprintln!("CM MCP: {}", error.msg);
@@ -112,6 +116,7 @@ pub fn main_entry(legacy: bool) {
     let result = if legacy {
         cli::Parsed::parse(&args).and_then(|p| memory_app::run(&p))
     } else {
+        let docs_command = args.len() > 1 && args[0] == "docs";
         if !args.is_empty()
             && !args
                 .first()
@@ -120,6 +125,7 @@ pub fn main_entry(legacy: bool) {
                 args[0].as_str(),
                 "help" | "--help" | "-h" | "init" | "feedback" | "ingest-session"
             )
+            && !docs_command
         {
             feedback::before_request();
         }

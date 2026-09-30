@@ -241,7 +241,8 @@ fn fixture(server: &Server, adapter: &str) -> TempDir {
     let path = temp.path().join("memory/config.json");
     let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     config["memory"]["verification_agent"] = Value::Null;
-    config["agent"]["providers"] = json!({"memory-test":{"adapter":adapter,"endpoint":server.endpoint,"default_model":"must-not-be-used"}});
+    config["agent"]["providers"]["memory-test"] =
+        json!({"adapter":adapter,"endpoint":server.endpoint,"default_model":"must-not-be-used"});
     config["agent"]["profiles"]["agent_medium"] =
         json!({"provider":"memory-test","model":"fixture","reasoning_effort":null});
     fs::write(path, config.to_string()).unwrap();
@@ -1177,15 +1178,15 @@ fn init_exposes_three_profiles_and_binding_defaults_to_medium() {
         serde_json::from_slice(&fs::read(temp.path().join("memory/config.json")).unwrap()).unwrap();
     for effort in ["high", "medium", "low"] {
         let profile = &config["agent"]["profiles"][format!("agent_{effort}")];
-        assert_eq!(profile["provider"], "codex");
-        assert_eq!(profile["model"], "gpt-5.5");
-        assert_eq!(profile["reasoning_effort"], effort);
+        assert_eq!(profile["provider"], "openrouter");
+        assert_eq!(profile["model"], "z-ai/glm-5.3-flash");
+        assert_eq!(profile["reasoning_effort"], "low");
     }
     common::run(temp.path(), &["create", "Application"], "").success();
     let binding = agent(temp.path(), &["bind", "application"]);
     assert_eq!(binding["agent"], "agent_medium");
-    assert_eq!(binding["model"], "gpt-5.5");
-    assert_eq!(binding["reasoning_effort"], "medium");
+    assert_eq!(binding["model"], "z-ai/glm-5.3-flash");
+    assert_eq!(binding["reasoning_effort"], "low");
 }
 
 #[test]

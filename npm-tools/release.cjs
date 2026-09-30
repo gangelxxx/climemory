@@ -11,8 +11,8 @@ async function check(root = ROOT) {
   const cargo = await fs.readFile(path.join(root, 'Cargo.toml'), 'utf8');
   const section = cargo.match(/^\[package\]\s*\r?\n([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1];
   const version = section?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-  if (pkg.name !== 'climemory' || !VERSION.test(pkg.version) || version !== pkg.version) {
-    throw new Error('package.json (climemory) and Cargo.toml must have the same stable x.y.z version.');
+  if (pkg.name !== '@gangelxxx/climemory' || !VERSION.test(pkg.version) || version !== pkg.version) {
+    throw new Error('package.json (@gangelxxx/climemory) and Cargo.toml must have the same stable x.y.z version.');
   }
   if (pkg.repository?.url !== `git+https://github.com/${REPO}.git`) throw new Error('Unexpected package repository.');
   return pkg;

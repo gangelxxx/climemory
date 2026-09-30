@@ -86,10 +86,6 @@ pub(super) fn search_passports(
         .map(|t| {
             let mut terms = t.passport.subtree_terms.clone();
             terms.extend(index::terms(&t.title));
-            terms.extend(index::terms(&t.passport.summary));
-            for q in &t.passport.questions {
-                terms.extend(index::terms(q));
-            }
             (t, terms)
         })
         .collect();
@@ -147,12 +143,55 @@ pub(super) fn targets(index: &Index, t: &Thread) -> Vec<String> {
         .filter(|n| n.parent.as_ref() == Some(&t.id))
         .map(|n| n.id.clone())
         .collect();
+    // Search may start at a section rather than its document root. Its sibling
+    // headings must remain discoverable even when they use different vocabulary.
+    // Expose passports only; sibling originals still require their own worker.
+    if t.parent.is_some()
+        && index
+            .sources
+            .iter()
+            .any(|s| s.id == t.source && s.authority == "user_document")
+    {
+        ids.extend(
+            index
+                .threads
+                .iter()
+                .filter(|n| n.source == t.source && n.parent == t.parent)
+                .map(|n| n.id.clone()),
+        );
+    }
     for link in &index.links {
         if link.from == t.id {
             ids.insert(link.to.clone());
         }
         if link.to == t.id {
             ids.insert(link.from.clone());
+        }
+    }
+    // Authored relative Markdown links are discovery edges, not verified facts.
+    // Include introductory links inherited from containing document sections.
+    if let Some(source) = index
+        .sources
+        .iter()
+        .find(|s| s.id == t.source && s.authority == "user_document")
+    {
+        let mut owner = Some(t);
+        let mut visited = BTreeSet::new();
+        while let Some(node) =
+            owner.filter(|n| n.source == t.source && visited.insert(n.id.clone()))
+        {
+            for fragment in &node.fragments {
+                for path in document_links(&source.path, &fragment.text) {
+                    ids.extend(
+                        index
+                            .sources
+                            .iter()
+                            .filter(|s| s.authority == "user_document" && s.path == path)
+                            .map(|s| s.id.clone()),
+                    );
+                }
+            }
+            owner = node.parent.as_ref().and_then(|id| index.thread(id));
         }
     }
     // Never delegate back to an ancestor; its own evidence is already in the traversal.
@@ -168,10 +207,41 @@ pub(super) fn targets(index: &Index, t: &Thread) -> Vec<String> {
     ids.into_iter().collect()
 }
 
+fn document_links(source: &str, text: &str) -> Vec<String> {
+    static LINKS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern =
+        LINKS.get_or_init(|| regex::Regex::new(r#"\]\(<?([^\s<>\)]+)>?(?:\s+[^\)]*)?\)"#).unwrap());
+    pattern
+        .captures_iter(text)
+        .filter_map(|capture| {
+            let target = capture[1].split('#').next()?.split('?').next()?;
+            if target.is_empty()
+                || target.contains(':')
+                || target.starts_with('/')
+                || target.contains('\\')
+            {
+                return None;
+            }
+            let mut parts: Vec<_> = source.split('/').collect();
+            parts.pop();
+            for part in target.split('/') {
+                match part {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop()?;
+                    }
+                    _ => parts.push(part),
+                }
+            }
+            Some(parts.join("/"))
+        })
+        .collect()
+}
+
 pub(super) fn passports(index: &Index, ids: &[String], question: &str) -> Vec<Value> {
     let query = index::terms(question);
     ids.iter().filter_map(|id|index.thread(id)).map(|t| {
-        let own_preview: String = t.fragments.iter().map(|f|f.text.as_str()).collect::<Vec<_>>().join(" ").chars().take(320).collect();
+        let own_preview: String = t.fragments.iter().map(|f|f.text.as_str()).collect::<Vec<_>>().join(" ").chars().take(1200).collect();
         let matching: Vec<_> = t.passport.subtree_terms.intersection(&query).collect();
         let topics: Vec<_> = t.passport.subtree_terms.iter().filter(|s|s.chars().any(char::is_alphabetic)).take(48).collect();
         let safeguards: Vec<_> = t.passport.subtree_terms.iter().filter(|s|["exception","exceptions","conflict","constraint","constraints","disabled","never","must","unless","override","исключение","исключения","запрет"].contains(&s.as_str())).collect();
@@ -432,6 +502,22 @@ pub(super) fn fold(
 #[cfg(test)]
 mod passthrough_tests {
     use super::*;
+
+    #[test]
+    fn document_link_paths_are_local_and_resolve_relative_to_source() {
+        assert_eq!(
+            document_links(
+                "memory/docs/governance/policy.md",
+                r#"[a](./guide/workflow.md#finish) [b](../checks.md "Checks") [c](<guide/README.md>)"#
+            ),
+            [
+                "memory/docs/governance/guide/workflow.md",
+                "memory/docs/checks.md",
+                "memory/docs/governance/guide/README.md"
+            ]
+        );
+        assert!(document_links("memory/docs/a.md", "[a](https://example.com/doc.md) [b](#section) [c](/root.md) [d](../../../../outside.md)").is_empty());
+    }
 
     #[test]
     fn only_empty_router_and_gapless_evidenced_child_can_bypass_synthesis() {

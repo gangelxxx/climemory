@@ -5,14 +5,15 @@ decisions and session history for a coding agent. It combines user-owned referen
 with advisory memory, returns evidence with source addresses, and imports new
 Codex session events into persistent topic threads.
 
-The current package version is **2.62.0**. The public interface is a read-only
+The current package version is **2.62.1**. The public interface is a read-only
 memory chat, a native MCP `ask` tool, explicit session ingestion, and optional
 Codex hooks. Chat does not edit source documents or memory facts; ingestion is
 the separate write path. Use ordinary development tools to search source code.
 
 | Name | Role |
 | --- | --- |
-| `climemory` | Public GitHub repository, Rust package and npm installer package. |
+| `climemory` | Public GitHub repository and Rust package. |
+| `@gangelxxx/climemory` | npm installer package. |
 | `cm.exe` / `cm` | Executable installed in your project. |
 
 Format identifiers, managed integration markers and installer state use
@@ -24,14 +25,14 @@ Format identifiers, managed integration markers and installer state use
 
 ## Quick start
 
-The npm installation path requires a published `climemory` release. Maintainers
+The npm installation path requires a published `@gangelxxx/climemory` release. Maintainers
 setting it up for the first time should follow [first publication](#first-publication).
 
 With **Node.js 22.14+ and npm**, run this in the project where you want memory:
 
 ```powershell
 cd path/to/your-project
-npx climemory@latest init
+npx @gangelxxx/climemory@latest init
 ```
 
 The installer downloads the binary for its exact version from GitHub Releases,
@@ -78,7 +79,7 @@ are not code-signed or notarized by this workflow.
 From the same project directory:
 
 ```powershell
-npx climemory@latest init
+npx @gangelxxx/climemory@latest init
 ```
 
 Existing memory, documents and configuration are preserved. On Windows, close
@@ -117,10 +118,15 @@ existing unmanaged MCP server named `cm` causes an error instead of being
 overwritten. Open or restart Codex in that project and trust its settings when
 prompted. Initialization does not install automatic history hooks.
 
-The generated agent profiles currently use the Codex adapter with model
-`gpt-5.5` and low/medium/high reasoning effort. These are configuration defaults,
-not a guarantee of account access: select models and credentials available in
-your environment before making requests. Provider tests make real model calls.
+New installations include an OpenRouter provider and three agent profiles
+(`agent_low`, `agent_medium`, `agent_high`) using `z-ai/glm-5.3-flash` with low
+reasoning effort. Set `OPENROUTER_API_KEY` in the environment of the process
+running CM (including your editor for MCP), or configure your own provider and
+models in `memory/config.json`. No API key is bundled. The generated provider
+allows remote content and requests structured JSON output with an 8192-token
+output budget. Routing prefers Together, then Baseten, with fallbacks allowed.
+Provider tests make real model calls. Re-running `init` preserves
+existing configuration, including model choices and credentials.
 
 CM resolves the nearest initialized project above the current directory, falling
 back to initialized memory next to its executable. Run from the intended project
@@ -140,6 +146,9 @@ use `.\cm.exe` in PowerShell or `./cm` on Unix, unless you have added it to `PAT
 | `cm init` | Initialize memory and project MCP/instructions. |
 | `cm help` | Show the public CLI help and version. |
 | `cm ingest-session` | Import new events from the identified Codex session. |
+| `cm docs build [--dry-run]` | Prepare document threads explicitly, or preview the pending files without model calls. |
+| `cm docs status` | Compare current document hashes with the last complete build. |
+| `cm --version` | Print the executable version without opening a project or calling models. |
 | `cm -test_providers` | Probe configured model profiles without sending memory. |
 | `cm feedback "<description>"` | Save feedback without a model call or requirement changes. |
 | `cm hooks install codex` | Install automatic history/context hooks for this project. |
@@ -174,11 +183,21 @@ characters, more than 1024 filesystem entries, or more than 4,000,000 bytes in
 total instead of silently skipping material.
 
 CM builds a local index of documents, thread notes and current imported claims.
-Document sections become derived threads without changing the originals. Local
-search selects matching roots and bounded child summaries (passports); recursive
+By default each document is searched as a whole, without section threads or
+model-generated subdivisions. Run `cm docs build` to prepare experimental
+document threads, then set `memory.documents_as_threads: true` to use them.
+Chat never creates or repartitions document threads. Missing, changed or invalid
+prepared documents are searched as whole files until the next explicit build.
+Local search selects matching
+roots and bounded child summaries (passports); recursive
 agents consult relevant branches and combine their evidence. A verification
 agent checks coverage against reviewed originals. This verifies an answer's
 support in those sources; it does not run tests or prove the implementation works.
+In the experimental mode, section agents can consult sibling sections. Agents
+follow relative Markdown links to indexed documents, including links in their containing sections. These links
+are navigation hints; answers still require original evidence from the target.
+Search terms come from source text and headings, so a failed query mentioned in
+a worker summary does not make an unrelated document match future queries.
 
 User documents outrank advisory memory. A newer timestamp does not make a memory
 claim more authoritative. Conflicts, missing aspects and failed retrieval work
@@ -232,7 +251,8 @@ provider names need an explicit `adapter`. CLI adapters require the correspondin
 executable and authentication. Codex subprocesses are launched with `--no-daemon`
 before the subcommand.
 
-For an HTTP setup, merge a provider and profile like these into the generated
+OpenRouter is already configured in new installations. For another HTTP setup,
+merge a provider and profile like these into the generated
 `agent.providers` and `agent.profiles` maps. Replace `MODEL_ID` with your model:
 
 ```json
@@ -285,6 +305,7 @@ on the endpoint/model.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `memory.mode` | `threads` | Chat remains read-only; `docs_only` additionally excludes threads. |
+| `memory.documents_as_threads` | `false` | Use current document threads prepared by `cm docs build`. When off, or when a file has no current prepared threads, search the whole file. Chat never initiates conversion. Changing the flag invalidates retrieval reuse; original files and saved memory threads are preserved. |
 | `memory.timeout_seconds` | `120` | Overall retrieval deadline, 1–600 seconds. |
 | `memory.unified.concurrency` | `3` | Parallel retrieval workers, 1–8. |
 | `memory.unified.max_candidates` | `8` | Local root-candidate limit, 1–32. |
@@ -298,6 +319,9 @@ on the endpoint/model.
 
 The retired `memory.unified.enabled` key is accepted but has no effect, even when
 false. Old coordinator/document phase limits do not control unified retrieval.
+Legacy top-level `rag`, `semantic_search`, and `context_graph` sections are no
+longer used. Retrieval is configured through `memory.unified`, the memory agent
+selections above, and their `agent.profiles` / `agent.providers` settings.
 
 All CM HTTP agent and classifier calls can use an explicit proxy:
 
@@ -319,6 +343,50 @@ retries, logging and accounting, without sending documents or chat history.
 Unused providers are `not_tested`. Exit code zero requires at least one successful
 profile and no failed profiles; `complete: false` can still indicate untested
 providers. A probe confirms that minimal request, not every retrieval workflow.
+
+## Preparing document threads
+
+Document preparation is an explicit, incremental operation:
+
+```powershell
+cm docs build --dry-run
+cm docs build -pretty -ru
+cm docs status -pretty -ru
+```
+
+`docs_hash` is SHA-256 over a sorted mapping of relative document paths to their
+SHA-256 content hashes. Adding, editing, deleting or renaming a file changes it;
+rewriting identical bytes does not. `threads_docs_hash` identifies the snapshot
+used by the last complete build (null before the first successful build).
+Status is `not_built`, `up_to_date` or `outdated`; output includes added, changed,
+deleted and pending paths, ready document/thread counts, and incomplete-build
+errors. Default output is JSON; `-pretty` enables readable output.
+
+Build reads only `memory/docs`, splits large documents by headings/size, and
+uses `memory.documents_agent` to summarize sections and optionally partition
+large leaves by topic. Each model call uses `memory.timeout_seconds` as its
+deadline, including one correction attempt if the returned partition or summary
+fails validation. The correction names duplicate, missing or unknown fragment
+IDs; a second invalid response leaves that document pending. Original text and
+line references are preserved. Model calls can incur
+provider usage; status and dry-run do not invoke models. Build does not enable
+`memory.documents_as_threads` or modify source documents.
+
+Prepared threads are ordinary Markdown files at `memory/threads/<id-prefix>/<id>.md`,
+with native agent bindings in `memory/thread-agents/`. They contain the document
+path and SHA-256, parent/child thread links, a summary and original fragments with
+line references. Status counts only threads whose native files are present and
+current. Re-running build migrates old JSON-only checkpoints and repairs missing
+files without repeating model calls. Generated bindings do not duplicate original
+document evidence in search; the whole-document setting still applies.
+
+Progress is saved atomically after each document. Re-running skips valid,
+unchanged files and removes prepared entries for deleted documents. Failed
+documents leave a nonzero exit status and can be retried with the same command.
+The complete snapshot hash advances only after all files succeed. If documents
+change during a build, status compares the result with the new contents and
+reports an update is needed. Concurrent builds are locked; chat can continue
+using valid checkpoints and falls back to whole files for stale documents.
 
 ## Saving session memory
 
@@ -428,6 +496,7 @@ incur usage even if their results are rejected or time out.
 | `memory/threads/` | Persistent native thread memory. |
 | `memory/thread-agents/` | Thread agent bindings and associated persistent state. |
 | `memory/runtime/unified/` | Derived indexes, topic context and retrieval traces. |
+| `memory/runtime/docs/` | Document build hashes, last complete manifest and resumable model checkpoints. Native threads are in `memory/threads/`; keep checkpoints to avoid repeating model work. |
 | `memory/runtime/session-ingest/` | Import checkpoints, frozen batches and revisions. |
 | `memory/runtime/session-reads/` | Session-scoped CM read receipts. |
 | `memory/runtime/hooks/` | Hook queues, context cache and import receipts. |
@@ -462,7 +531,7 @@ automatic diagnostics and accepts up to 8000 characters.
 ## Publishing and updating releases
 
 The release workflow is configured for `gangelxxx/climemory` and the npm package
-`climemory`. It builds Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon
+`@gangelxxx/climemory`. It builds Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon
 binaries, publishes them to GitHub Releases, then publishes the npm installer.
 The npm package includes the release's checksums and downloads only the binary
 needed by the user's platform.
@@ -473,7 +542,7 @@ Before automatic npm publishing can work:
 
 1. Push the full project, including the Rust sources and both npm workflows, to
    GitHub. The workflows need `Cargo.toml`, `Cargo.lock`, `src/`, `tests/`, README,
-   `package.json`, `bin/`, `npm-tools/`, and `NPM-RELEASE.md` in the repository.
+   `package.json`, `bin/`, and `npm-tools/` in the repository.
 2. Run the **npm release** workflow manually on the default branch with
    **publish_npm unchecked**. This creates the binary release and the
    **npm-package** workflow artifact without publishing to npm.
@@ -482,7 +551,7 @@ Before automatic npm publishing can work:
 
    ```powershell
    npm login
-   npm publish ./climemory-2.62.0.tgz --access public
+   npm publish ./gangelxxx-climemory-2.62.1.tgz --access public
    ```
 
 4. In the npm package settings, configure a GitHub Actions Trusted Publisher:
@@ -491,8 +560,7 @@ Before automatic npm publishing can work:
 
 Subsequent releases use OIDC without a stored npm token. Do not publish the raw
 source checkout: its binary checksum manifest is generated during release
-preparation. Full setup and recovery instructions are in
-[NPM-RELEASE.md](NPM-RELEASE.md#one-time-publication-setup).
+preparation.
 
 ### Subsequent releases
 

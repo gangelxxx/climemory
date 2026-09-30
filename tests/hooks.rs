@@ -275,7 +275,7 @@ fn prompt_retrieves_user_document_and_reuses_duplicate_turn_without_models() {
     let first = invoke(c, prompt.clone());
     let context = first["hookSpecificOutput"]["additionalContext"]
         .as_str()
-        .expect(&first.to_string());
+        .unwrap_or_else(|| panic!("{first}"));
     assert!(context.contains("blue"), "{context}");
     assert!(context.contains("red"), "{context}");
     let calls = fs::read(d.path().join("calls.json")).unwrap();

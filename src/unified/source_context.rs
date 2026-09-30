@@ -201,7 +201,7 @@ mod tests {
             addresses: vec![],
             claims: vec![],
         };
-        let index = index::build(vec![source], None).unwrap();
+        let index = index::build(vec![source], None, true).unwrap();
         let result = json!({"status":"complete","conflicts":[],"coverage":{"reviewed_threads":["doc-test"]},"evidence":[{"source":"memory/docs/test.md","line":3,"quote":text.lines().nth(2).unwrap_or("")}]});
         (index, result)
     }

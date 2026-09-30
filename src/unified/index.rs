@@ -75,6 +75,10 @@ pub(super) struct Link {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct Index {
     pub format: u32,
+    #[serde(default)]
+    pub documents_as_threads: bool,
+    #[serde(default)]
+    pub prepared_documents: BTreeMap<String, String>,
     pub revision: String,
     pub sources: Vec<Source>,
     pub threads: Vec<Thread>,
@@ -90,6 +94,15 @@ pub(super) fn terms(s: &str) -> BTreeSet<String> {
 }
 
 pub(super) fn sources(project: &Project) -> Result<Vec<Source>> {
+    let mut result = document_sources(project)?;
+    if project.config.memory.mode != crate::config::MemoryMode::DocsOnly {
+        append_memory_sources(project, &mut result)?;
+    }
+    result.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(result)
+}
+
+pub(super) fn document_sources(project: &Project) -> Result<Vec<Source>> {
     let mut result = Vec::new();
     for d in project.user_documents()? {
         let path = d["path"].as_str().unwrap().to_owned();
@@ -107,9 +120,16 @@ pub(super) fn sources(project: &Project) -> Result<Vec<Source>> {
             claims: Vec::new(),
         });
     }
-    if project.config.memory.mode != crate::config::MemoryMode::DocsOnly {
+    Ok(result)
+}
+
+fn append_memory_sources(project: &Project, result: &mut Vec<Source>) -> Result<()> {
+    {
         let fresh_project = Project::open(&project.root)?;
-        for m in crate::thread_agents::source_inventory(&fresh_project)? {
+        for m in crate::thread_agents::source_inventory(
+            &fresh_project,
+            &super::docs::native_ids(project)?,
+        )? {
             result.push(Source {
                 id: format!("memory-{}", m["thread_id"].as_str().unwrap()),
                 path: m["path"].as_str().unwrap().into(),
@@ -128,7 +148,7 @@ pub(super) fn sources(project: &Project) -> Result<Vec<Source>> {
             });
         }
     }
-    if project.config.memory.mode != crate::config::MemoryMode::DocsOnly {
+    {
         for c in crate::session_ingest::current_claim_sources(project)? {
             result.push(Source {
                 id: c["id"].as_str().unwrap().into(),
@@ -145,18 +165,17 @@ pub(super) fn sources(project: &Project) -> Result<Vec<Source>> {
             });
         }
     }
-    result.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(result)
+    Ok(())
 }
 
-const INDEX_FORMAT: u32 = 2;
+const INDEX_FORMAT: u32 = 4;
 
 /// Small authored documents remain a single original unit, independent of query.
 pub(super) fn source_is_cohesive(source: &Source) -> bool {
     source.authority == "user_document" && source.text.len() <= 2048
 }
 
-fn split(source: &Source) -> Vec<Thread> {
+fn split(source: &Source, documents_as_threads: bool) -> Vec<Thread> {
     let mut result = vec![Thread {
         id: source.id.clone(),
         source: source.id.clone(),
@@ -167,7 +186,8 @@ fn split(source: &Source) -> Vec<Thread> {
         passport: Passport::default(),
         elements: source.claims.clone(),
     }];
-    let cohesive = source_is_cohesive(source);
+    let cohesive = source_is_cohesive(source)
+        || (source.authority == "user_document" && !documents_as_threads);
     let mut stack: Vec<(usize, String)> = vec![(0, source.id.clone())];
     let mut occurrences = BTreeMap::<String, usize>::new();
     let mut current = 0;
@@ -208,7 +228,7 @@ fn split(source: &Source) -> Vec<Thread> {
             size = 0;
         }
         // Bound agent inputs even for unstructured text. Preserve original line addresses.
-        if size + text.len() > 12_000 && !result[current].fragments.is_empty() {
+        if !cohesive && size + text.len() > 12_000 && !result[current].fragments.is_empty() {
             let parent = stack.last().unwrap().1.clone();
             let id = format!("part-{}", &digest(format!("{parent}/line/{n}"))[..16]);
             result.push(Thread {
@@ -250,17 +270,65 @@ fn split(source: &Source) -> Vec<Thread> {
     result
 }
 
-pub(super) fn build(sources: Vec<Source>, old: Option<&Index>) -> Result<Index> {
+pub(super) fn build(
+    sources: Vec<Source>,
+    old: Option<&Index>,
+    documents_as_threads: bool,
+) -> Result<Index> {
+    build_impl(sources, old, documents_as_threads, None)
+}
+
+pub(super) fn for_search(
+    project: &Project,
+    sources: Vec<Source>,
+    old: Option<&Index>,
+) -> Result<Index> {
+    let prepared = if project.config.memory.documents_as_threads {
+        super::docs::prepared(project, &sources)?
+    } else {
+        BTreeMap::new()
+    };
+    build_impl(
+        sources,
+        old,
+        project.config.memory.documents_as_threads,
+        Some(&prepared),
+    )
+}
+
+fn build_impl(
+    sources: Vec<Source>,
+    old: Option<&Index>,
+    documents_as_threads: bool,
+    prepared: Option<&BTreeMap<String, Vec<Thread>>>,
+) -> Result<Index> {
     let revision = digest(serde_json::to_vec(&sources)?);
     let mut index = Index {
         format: INDEX_FORMAT,
+        documents_as_threads,
         revision,
         sources,
         ..Index::default()
     };
+    if let Some(prepared) = prepared {
+        for (id, threads) in prepared {
+            index
+                .prepared_documents
+                .insert(id.clone(), digest(serde_json::to_vec(threads)?));
+        }
+    }
     for source in &index.sources {
         if let Some(previous) = old.filter(|o| {
             o.format == INDEX_FORMAT
+                && o.documents_as_threads == documents_as_threads
+                && o.prepared_documents.get(&source.id) == index.prepared_documents.get(&source.id)
+                && (prepared.is_none()
+                    || source.authority != "user_document"
+                    || index.prepared_documents.contains_key(&source.id)
+                    || o.threads.iter().filter(|t| t.source == source.id).count() == 1
+                        && o.threads
+                            .iter()
+                            .any(|t| t.source == source.id && t.id == source.id))
                 && o.sources.iter().any(|s| s == source)
                 && original_fragments_match(o, source)
         }) {
@@ -272,7 +340,18 @@ pub(super) fn build(sources: Vec<Source>, old: Option<&Index>) -> Result<Index> 
                     .cloned(),
             );
         } else {
-            index.threads.extend(split(source));
+            let threads = if source.authority == "user_document" {
+                match prepared {
+                    Some(prepared) => prepared
+                        .get(&source.id)
+                        .cloned()
+                        .unwrap_or_else(|| split(source, false)),
+                    None => split(source, documents_as_threads),
+                }
+            } else {
+                split(source, documents_as_threads)
+            };
+            index.threads.extend(threads);
         }
     }
     if index.threads.len() > 8192 {
@@ -304,6 +383,12 @@ pub(super) fn build(sources: Vec<Source>, old: Option<&Index>) -> Result<Index> 
     for t in &mut index.threads {
         if t.parent.as_ref().is_some_and(|p| !valid.contains(p)) {
             t.parent = None;
+        }
+        // Rebuild from originals, including for persisted passports. A worker
+        // can mention a missing query topic in its summary; that is not a hit.
+        t.passport.terms = terms(&t.title);
+        for fragment in &t.fragments {
+            t.passport.terms.extend(terms(&fragment.text));
         }
         t.passport.subtree_terms = t.passport.terms.clone();
     }
@@ -437,10 +522,6 @@ fn refresh_revision(index: &mut Index) -> Result<()> {
         for f in &t.fragments {
             own.extend(terms(&f.text));
         }
-        own.extend(terms(&t.passport.summary));
-        for q in &t.passport.questions {
-            own.extend(terms(q));
-        }
         for term in own {
             index.postings.entry(term).or_default().push(t.id.clone());
         }
@@ -457,7 +538,13 @@ fn refresh_revision(index: &mut Index) -> Result<()> {
         })
         .collect();
     layout.sort_by(|a, b| a.0.cmp(b.0));
-    index.revision = digest(serde_json::to_vec(&(index.format, &index.sources, layout))?);
+    index.revision = digest(serde_json::to_vec(&(
+        index.format,
+        index.documents_as_threads,
+        &index.prepared_documents,
+        &index.sources,
+        layout,
+    ))?);
     Ok(())
 }
 
@@ -465,6 +552,9 @@ pub(super) fn apply_groups(
     index: &mut Index,
     selections: &BTreeMap<String, worker::Selection>,
 ) -> Result<()> {
+    if !index.documents_as_threads {
+        return Ok(());
+    }
     for (id, selection) in selections {
         if selection.groups.is_empty() {
             continue;
@@ -562,7 +652,7 @@ pub(super) fn apply_groups(
     Ok(())
 }
 
-fn original_fragments_match(index: &Index, source: &Source) -> bool {
+pub(super) fn original_fragments_match(index: &Index, source: &Source) -> bool {
     let expected: BTreeMap<_, _> = source
         .text
         .lines()
@@ -630,6 +720,13 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Existing hierarchy/partition tests exercise the opt-in mode explicitly.
+    fn build(sources: Vec<Source>, old: Option<&Index>) -> Result<Index> {
+        super::build(sources, old, true)
+    }
+    fn split(source: &Source) -> Vec<Thread> {
+        super::split(source, true)
+    }
     fn source(text: &str) -> Source {
         Source {
             id: "doc-ui".into(),
@@ -682,6 +779,77 @@ mod tests {
         memory.authority = "advisory_memory".into();
         assert!(!source_is_cohesive(&memory));
         assert!(split(&memory).len() > 1);
+    }
+
+    #[test]
+    fn document_mode_switch_rebuilds_layout_and_preserves_original_lines() {
+        let s = source(&format!(
+            "# Intro\n{}\n## Checks\nRun checker.\n",
+            "Original text. ".repeat(1000)
+        ));
+        let experimental = super::build(vec![s.clone()], None, true).unwrap();
+        assert!(experimental.threads.len() > 1);
+        let flat = super::build(vec![s.clone()], Some(&experimental), false).unwrap();
+        assert_eq!(flat.threads.len(), 1);
+        assert_eq!(flat.threads[0].fragments.len(), 4);
+        assert_eq!(
+            flat.threads[0].fragments[1].text.len(),
+            "Original text. ".len() * 1000
+        );
+        assert_eq!(flat.threads[0].fragments[3].id, "doc-ui:L4");
+        assert_eq!(flat.threads[0].fragments[3].text, "Run checker.");
+        assert_ne!(experimental.revision, flat.revision);
+        let resumed = super::build(vec![s.clone()], Some(&flat), true).unwrap();
+        assert_eq!(resumed.revision, experimental.revision);
+        assert_eq!(
+            resumed.fragments().keys().collect::<Vec<_>>(),
+            flat.fragments().keys().collect::<Vec<_>>()
+        );
+        let mut legacy = experimental;
+        legacy.format = 2;
+        assert_eq!(
+            super::build(vec![s], Some(&legacy), false)
+                .unwrap()
+                .threads
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn document_flag_preserves_memory_hierarchy_and_changes_small_document_revision() {
+        let mut memory = source("# Memory\n## Child\nA stored fact.");
+        memory.authority = "advisory_memory".into();
+        let on = super::build(vec![memory.clone()], None, true).unwrap();
+        let off = super::build(vec![memory], Some(&on), false).unwrap();
+        assert_eq!(
+            on.threads.iter().map(|t| &t.id).collect::<Vec<_>>(),
+            off.threads.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+        assert!(off.threads.len() > 1);
+        let small = source("One rule.");
+        assert_ne!(
+            super::build(vec![small.clone()], None, true)
+                .unwrap()
+                .revision,
+            super::build(vec![small], None, false).unwrap().revision
+        );
+    }
+
+    #[test]
+    fn missing_query_topics_in_persisted_passports_do_not_become_search_hits() {
+        let s = source("# Typography\nUse 12px.");
+        let mut old = build(vec![s.clone()], None).unwrap();
+        old.threads[0].passport.summary = "Deployment command not found here".into();
+        old.threads[0].passport.questions = vec!["Where is deployment?".into()];
+        old.threads[0].passport.terms.extend(terms("deployment"));
+        let current = build(vec![s], Some(&old)).unwrap();
+        assert!(current.search("deployment").is_empty());
+        assert!(!current.threads[0]
+            .passport
+            .subtree_terms
+            .contains("deployment"));
+        assert_eq!(current.search("typography"), ["doc-ui"]);
     }
 
     #[test]

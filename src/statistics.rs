@@ -212,7 +212,7 @@ pub(crate) fn begin_project(
     };
     let lease = lifecycle::start(&project.data, &path).ok();
     let data = json!({"run_id":path.file_stem().unwrap().to_string_lossy(),"requests":[request()],"events":[],"format":"climemory/statistics-1","version":crate::build_info::BINARY_VERSION,"started_at":iso_now(),"status":"running","lifecycle_tracked":lease.is_some(),
-        "command":match args.first().map(String::as_str) { Some("--feedback-worker") => "diagnostic_analysis", Some("hooks") => "hooks", Some("ingest-session") => "ingest-session", Some("-test_providers") => "test_providers", Some("feedback") => "feedback", _ => "chat" },
+        "command":match args.first().map(String::as_str) { Some("--feedback-worker") => "diagnostic_analysis", Some("hooks") => "hooks", Some("ingest-session") => "ingest-session", Some("-test_providers") => "test_providers", Some("feedback") => "feedback", Some("docs") if args.len() > 1 => "docs", _ => "chat" },
         "session_id":session.map(str::to_owned).or_else(||std::env::var("CODEX_THREAD_ID").or_else(|_|std::env::var("CODEX_SESSION_ID")).ok()),
         "exchange":{"requests":0,"input_chars":0,"input_bytes":0,"responses":0,"output_chars":0,"output_bytes":0,"errors":0,"input_tokens":null,"output_tokens":null},
         "calls":[],"cache":{},"source_events":0,"source_chars":0,"source_by_kind":{},"primary_session_usage":null,

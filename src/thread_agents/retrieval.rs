@@ -452,6 +452,7 @@ mod tests {
             revision: 1,
             last_dialogue: None,
             updated: iso_now(),
+            document: None,
         };
         let path = binding_path(&project, &id).unwrap();
         write_json(&path, &binding).unwrap();
