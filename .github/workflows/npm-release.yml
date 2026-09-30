@@ -1,0 +1,148 @@
+name: npm release
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: Publish to npm (disable for first-release bootstrap)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Ordinary pushes must not displace a pending release in GitHub's queue.
+  group: >-
+    ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+        (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'npm release')) &&
+        'climemory-release' || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'gangelxxx/climemory' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'npm release'))
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.registry.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: npm test
+      - run: npm run release:check
+      - id: registry
+        run: node npm-tools/registry.cjs
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
+      - run: cargo test --locked --no-default-features
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            binary: cm.exe
+            asset: cm-windows-x64.exe
+          - runner: ubuntu-22.04
+            binary: cm
+            asset: cm-linux-x64
+          - runner: ubuntu-22.04-arm
+            binary: cm
+            asset: cm-linux-arm64
+          - runner: macos-15-intel
+            binary: cm
+            asset: cm-macos-x64
+          - runner: macos-15
+            binary: cm
+            asset: cm-macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm test
+      - run: cargo build --locked --release --bin cm
+      - name: Test real installation in a temporary project
+        run: node npm-tools/smoke.cjs target/release/${{ matrix.binary }}
+      - name: Name release asset
+        shell: bash
+        env:
+          BINARY: ${{ matrix.binary }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir release-assets
+          cp "target/release/$BINARY" "release-assets/$ASSET"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.asset }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binary-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish binary release and prepare checksum-bound npm manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm-tools/github-release.cjs release-assets
+      - run: node npm-tools/release.cjs verify-package
+      - name: Smoke test the published Linux binary
+        run: node npm-tools/smoke.cjs release-assets/cm-linux-x64
+      - run: npm pack --dry-run
+      - run: npm pack
+      - name: Test packed CLI against the public release
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          package="$PWD/climemory-$VERSION.tgz"
+          project=$(mktemp -d)
+          cd "$project"
+          npm exec --yes --package="$package" -- climemory init
+          ./cm help
+          test -f memory/config.json
+          test -f .codex/config.toml
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-package
+          path: climemory-*.tgz
+          if-no-files-found: error
+      - id: registry
+        run: node npm-tools/registry.cjs
+      - name: Publish with npm Trusted Publishing (OIDC)
+        if: >-
+          steps.registry.outputs.published != 'true' &&
+          (github.event_name != 'workflow_dispatch' || inputs.publish_npm)
+        run: npm publish --access public

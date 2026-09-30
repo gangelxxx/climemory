@@ -1,0 +1,19 @@
+{
+  "name": "climemory",
+  "version": "2.62.0",
+  "description": "Install climemory project memory for coding agents",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/gangelxxx/climemory.git" },
+  "homepage": "https://github.com/gangelxxx/climemory#readme",
+  "bin": {
+    "climemory": "bin/climemory.cjs"
+  },
+  "files": ["bin/", "NPM-RELEASE.md"],
+  "engines": { "node": ">=22.14.0" },
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "test": "node --test npm-tools/installer.test.cjs npm-tools/release.test.cjs npm-tools/package.test.cjs",
+    "release:check": "node npm-tools/release.cjs check",
+    "prepublishOnly": "node npm-tools/release.cjs verify-package"
+  }
+}

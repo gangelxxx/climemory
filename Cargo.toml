@@ -1,0 +1,83 @@
+[package]
+name = "climemory"
+version = "2.62.0"
+edition = "2021"
+description = "Multi-agent advisory memory for coding agents"
+license = "MIT"
+
+[[bin]]
+name = "cm"
+path = "src/main.rs"
+
+[[bin]]
+name = "cm-internal-tests"
+path = "src/bin/cm-internal-tests.rs"
+required-features = ["internal-test-cli"]
+
+[[test]]
+name = "memory_cli"
+required-features = ["internal-test-cli"]
+
+[[test]]
+name = "thread_agents"
+required-features = ["internal-test-cli"]
+
+[dependencies]
+getrandom = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "system-proxy"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ignore = "0.4"
+libc = "0.2"
+regex = "1"
+rayon = { version = "1.10", optional = true }
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-tags = { version = "0.26", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-cpp = { version = "0.23", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-ruby = { version = "0.23", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
+toml_edit = "0.22"
+
+[features]
+internal-test-cli = []
+default = ["code-index"]
+code-index = [
+    "dep:rayon",
+    "dep:tree-sitter",
+    "dep:tree-sitter-tags",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-java",
+    "dep:tree-sitter-c",
+    "dep:tree-sitter-cpp",
+    "dep:tree-sitter-c-sharp",
+    "dep:tree-sitter-ruby",
+    "dep:tree-sitter-php",
+]
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+# Read-only SQL probe for the code-index meta table in worker/check tests
+# (same version as the bin dependency, so no extra build cost).
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = true
