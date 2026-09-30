@@ -28,7 +28,7 @@ function inspect(pkg, metadata) {
 
 async function main() {
   const pkg = await check();
-  const response = await fetch(`https://registry.npmjs.org/${pkg.name}`, { signal: AbortSignal.timeout(30_000) });
+  const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(pkg.name)}`, { signal: AbortSignal.timeout(30_000) });
   if (response.status !== 404 && !response.ok) throw new Error(`npm registry returned HTTP ${response.status}`);
   const metadata = response.status === 404 ? null : await response.json();
   const published = inspect(pkg, metadata);

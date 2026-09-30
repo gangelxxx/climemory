@@ -5,14 +5,15 @@ decisions and session history for a coding agent. It combines user-owned referen
 with advisory memory, returns evidence with source addresses, and imports new
 Codex session events into persistent topic threads.
 
-The current package version is **2.62.0**. The public interface is a read-only
+The current package version is **2.62.1**. The public interface is a read-only
 memory chat, a native MCP `ask` tool, explicit session ingestion, and optional
 Codex hooks. Chat does not edit source documents or memory facts; ingestion is
 the separate write path. Use ordinary development tools to search source code.
 
 | Name | Role |
 | --- | --- |
-| `climemory` | Public GitHub repository, Rust package and npm installer package. |
+| `climemory` | Public GitHub repository and Rust package. |
+| `@gangelxxx/climemory` | npm installer package. |
 | `cm.exe` / `cm` | Executable installed in your project. |
 
 Format identifiers, managed integration markers and installer state use
@@ -24,14 +25,14 @@ Format identifiers, managed integration markers and installer state use
 
 ## Quick start
 
-The npm installation path requires a published `climemory` release. Maintainers
+The npm installation path requires a published `@gangelxxx/climemory` release. Maintainers
 setting it up for the first time should follow [first publication](#first-publication).
 
 With **Node.js 22.14+ and npm**, run this in the project where you want memory:
 
 ```powershell
 cd path/to/your-project
-npx climemory@latest init
+npx @gangelxxx/climemory@latest init
 ```
 
 The installer downloads the binary for its exact version from GitHub Releases,
@@ -78,7 +79,7 @@ are not code-signed or notarized by this workflow.
 From the same project directory:
 
 ```powershell
-npx climemory@latest init
+npx @gangelxxx/climemory@latest init
 ```
 
 Existing memory, documents and configuration are preserved. On Windows, close
@@ -462,7 +463,7 @@ automatic diagnostics and accepts up to 8000 characters.
 ## Publishing and updating releases
 
 The release workflow is configured for `gangelxxx/climemory` and the npm package
-`climemory`. It builds Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon
+`@gangelxxx/climemory`. It builds Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon
 binaries, publishes them to GitHub Releases, then publishes the npm installer.
 The npm package includes the release's checksums and downloads only the binary
 needed by the user's platform.
@@ -482,7 +483,7 @@ Before automatic npm publishing can work:
 
    ```powershell
    npm login
-   npm publish ./climemory-2.62.0.tgz --access public
+   npm publish ./gangelxxx-climemory-2.62.1.tgz --access public
    ```
 
 4. In the npm package settings, configure a GitHub Actions Trusted Publisher:

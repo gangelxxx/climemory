@@ -29,11 +29,14 @@ test('packed npm artifact includes manifest, excludes private files and runs thr
       npm_config_audit: 'false', npm_config_fund: 'false' },
   });
   const [packed] = JSON.parse(call(['pack', '--json', '--ignore-scripts']));
+  const pkg = require('../package.json');
+  assert.equal(packed.name, '@gangelxxx/climemory');
+  assert.equal(packed.filename, `gangelxxx-climemory-${pkg.version}.tgz`);
   assert.deepEqual(packed.files.map(file => file.path).sort(),
     ['README.md', 'bin/climemory.cjs', 'bin/installer.cjs', 'bin/release.json', 'package.json'].sort());
   const consumer = path.join(root, 'consumer');
   await fs.mkdir(consumer);
   const output = call(['exec', '--yes', '--offline', `--package=${path.join(root, packed.filename)}`, '--', 'climemory', '--help'], consumer);
-  assert.match(output, /Usage: npx climemory@latest init/);
+  assert.match(output, /Usage: npx @gangelxxx\/climemory@latest init/);
   assert.deepEqual(await fs.readdir(consumer), []);
 });
