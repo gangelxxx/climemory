@@ -442,22 +442,6 @@ fn diagnostic_excerpt(value: &Value, depth: usize) -> Value {
     }
 }
 
-#[cfg(test)]
-mod excerpt_tests {
-    use super::*;
-    #[test]
-    fn diagnostic_context_omits_payloads_and_bounds_messages() {
-        let value = json!({"event":"attempt_failed", "data":{
-            "error":"x".repeat(10000),"elapsed_ms":4000,"prompt":"private large prompt",
-            "response":"large response","schema":{"secret":"payload"}}});
-        let excerpt = diagnostic_excerpt(&value, 0);
-        assert_eq!(excerpt["data"]["elapsed_ms"], 4000);
-        assert_eq!(excerpt["data"]["error"].as_str().unwrap().len(), 320);
-        assert!(excerpt["data"].get("prompt").is_none());
-        assert!(excerpt.to_string().len() < 500);
-    }
-}
-
 fn analyze_batch(j: &Journal, state: State) -> Result<()> {
     let batch: Vec<_> = state.pending.into_iter().take(8).collect();
     let ids: Vec<_> = batch.iter().map(|i| &i.id).collect();
@@ -649,4 +633,20 @@ pub(crate) fn dispatch_worker(args: &[String]) -> Option<Result<()>> {
         }
         result
     })())
+}
+
+#[cfg(test)]
+mod excerpt_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_context_omits_payloads_and_bounds_messages() {
+        let value = json!({"event":"attempt_failed", "data":{
+            "error":"x".repeat(10000),"elapsed_ms":4000,"prompt":"private large prompt",
+            "response":"large response","schema":{"secret":"payload"}}});
+        let excerpt = diagnostic_excerpt(&value, 0);
+        assert_eq!(excerpt["data"]["elapsed_ms"], 4000);
+        assert_eq!(excerpt["data"]["error"].as_str().unwrap().len(), 320);
+        assert!(excerpt["data"].get("prompt").is_none());
+        assert!(excerpt.to_string().len() < 500);
+    }
 }

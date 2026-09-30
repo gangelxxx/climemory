@@ -141,10 +141,7 @@ fn sanitize_tags_query(query: &str) -> String {
     let kept: Vec<&str> = query
         .split("\n\n")
         .filter(|stanza| {
-            let last_capture = stanza
-                .split_whitespace()
-                .filter(|tok| tok.starts_with('@'))
-                .next_back();
+            let last_capture = stanza.split_whitespace().rfind(|tok| tok.starts_with('@'));
             match last_capture {
                 // No capture at all (blank/comment-only) — harmless, keep it.
                 None => true,

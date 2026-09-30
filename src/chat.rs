@@ -135,10 +135,8 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                     }
                     chat(text.trim())
                 };
-                match result {
-                    Ok(answer) => println!("{answer}"),
-                    Err(error) => return Err(error),
-                }
+                let answer = result?;
+                println!("{answer}");
             }
             Ok(())
         }

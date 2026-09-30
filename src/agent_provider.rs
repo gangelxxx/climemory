@@ -2367,10 +2367,7 @@ pub(crate) fn read_bounded_tail(reader: impl Read, cap: usize) -> String {
     let mut reader = reader;
     let mut retained = Vec::new();
     let mut chunk = [0u8; 8_192];
-    loop {
-        let Ok(read) = reader.read(&mut chunk) else {
-            break;
-        };
+    while let Ok(read) = reader.read(&mut chunk) {
         if read == 0 {
             break;
         }
