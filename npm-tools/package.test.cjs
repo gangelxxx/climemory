@@ -14,7 +14,7 @@ test('packed npm artifact includes manifest, excludes private files and runs thr
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'climemory package '));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = path.resolve(__dirname, '..');
-  for (const name of ['package.json', 'Cargo.toml', 'README.md', 'NPM-RELEASE.md']) {
+  for (const name of ['package.json', 'Cargo.toml', 'README.md']) {
     await fs.copyFile(path.join(source, name), path.join(root, name));
   }
   await fs.cp(path.join(source, 'bin'), path.join(root, 'bin'), { recursive: true });
@@ -30,7 +30,7 @@ test('packed npm artifact includes manifest, excludes private files and runs thr
   });
   const [packed] = JSON.parse(call(['pack', '--json', '--ignore-scripts']));
   assert.deepEqual(packed.files.map(file => file.path).sort(),
-    ['NPM-RELEASE.md', 'README.md', 'bin/climemory.cjs', 'bin/installer.cjs', 'bin/release.json', 'package.json'].sort());
+    ['README.md', 'bin/climemory.cjs', 'bin/installer.cjs', 'bin/release.json', 'package.json'].sort());
   const consumer = path.join(root, 'consumer');
   await fs.mkdir(consumer);
   const output = call(['exec', '--yes', '--offline', `--package=${path.join(root, packed.filename)}`, '--', 'climemory', '--help'], consumer);

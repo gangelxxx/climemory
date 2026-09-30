@@ -473,7 +473,7 @@ Before automatic npm publishing can work:
 
 1. Push the full project, including the Rust sources and both npm workflows, to
    GitHub. The workflows need `Cargo.toml`, `Cargo.lock`, `src/`, `tests/`, README,
-   `package.json`, `bin/`, `npm-tools/`, and `NPM-RELEASE.md` in the repository.
+   `package.json`, `bin/`, and `npm-tools/` in the repository.
 2. Run the **npm release** workflow manually on the default branch with
    **publish_npm unchecked**. This creates the binary release and the
    **npm-package** workflow artifact without publishing to npm.
@@ -491,8 +491,7 @@ Before automatic npm publishing can work:
 
 Subsequent releases use OIDC without a stored npm token. Do not publish the raw
 source checkout: its binary checksum manifest is generated during release
-preparation. Full setup and recovery instructions are in
-[NPM-RELEASE.md](NPM-RELEASE.md#one-time-publication-setup).
+preparation.
 
 ### Subsequent releases
 
