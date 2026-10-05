@@ -5,7 +5,7 @@ decisions and session history for a coding agent. It combines user-owned referen
 with advisory memory, returns evidence with source addresses, and imports new
 Codex session events into persistent topic threads.
 
-The current package version is **2.62.1**. The public interface is a read-only
+The current package version is **2.62.2**. The public interface is a read-only
 memory chat, a native MCP `ask` tool, explicit session ingestion, and optional
 Codex hooks. Chat does not edit source documents or memory facts; ingestion is
 the separate write path. Use ordinary development tools to search source code.
@@ -551,7 +551,7 @@ Before automatic npm publishing can work:
 
    ```powershell
    npm login
-   npm publish ./gangelxxx-climemory-2.62.1.tgz --access public
+   npm publish ./gangelxxx-climemory-2.62.2.tgz --access public
    ```
 
 4. In the npm package settings, configure a GitHub Actions Trusted Publisher:

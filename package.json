@@ -1,6 +1,6 @@
 {
   "name": "@gangelxxx/climemory",
-  "version": "2.62.1",
+  "version": "2.62.2",
   "description": "Install climemory project memory for coding agents",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/gangelxxx/climemory.git" },

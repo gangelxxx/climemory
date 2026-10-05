@@ -1,6 +1,6 @@
 [package]
 name = "climemory"
-version = "2.62.1"
+version = "2.62.2"
 edition = "2021"
 description = "Multi-agent advisory memory for coding agents"
 license = "MIT"
