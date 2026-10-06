@@ -32,7 +32,7 @@ fn pretty_import_explains_pending_batches_and_unchecked_events_in_every_language
         let session = "11111111-2222-3333-4444-555555555555";
         fs::write(home.join(format!("sessions/rollout-{session}.jsonl")), format!("{}\n{}\n", json!({"type":"session_meta","payload":{"id":session}}), json!({"type":"response_item","payload":{"id":"request","type":"message","role":"user","content":[{"type":"input_text","text":"Save should be green"}]}}))).unwrap();
         let scenario = root.join("scenario.json");
-        fs::write(&scenario, json!({"state_file":root.join("failed-calls.json"),"calls":[{"final_message":"invalid"},{"final_message":"invalid"}]}).to_string()).unwrap();
+        fs::write(&scenario, json!({"state_file":root.join("failed-calls.json"),"calls":[{"final_message":"invalid"},{"final_message":"invalid"},{"final_message":"invalid"}]}).to_string()).unwrap();
         let run = || {
             Command::new(env!("CARGO_BIN_EXE_cm"))
                 .current_dir(root)

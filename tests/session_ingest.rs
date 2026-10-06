@@ -208,6 +208,261 @@ fn success(out: Output) -> Value {
 }
 
 #[test]
+fn full_text_is_saved_once_with_bounded_routing_preview() {
+    let f = Fixture::new();
+    f.message("long-rule", "Preserve the detailed rule");
+    let original = format!("{}\tPreserved condition", "я".repeat(9000));
+    let mut response = reply("long-rule", &original);
+    let mut patch: Value =
+        serde_json::from_str(response["final_message"].as_str().unwrap()).unwrap();
+    patch["updates"][0]["title"] = json!("Long title ".repeat(150));
+    response["final_message"] = json!(patch.to_string());
+    f.scenario(vec![
+        response,
+        json!({"exit_code":1,"stderr":"unexpected extra model call"}),
+    ]);
+    let result = success(f.run());
+    assert_eq!(result["model_calls"], 1);
+    assert_eq!(result["write_receipt"]["status"], "saved");
+    assert_eq!(
+        f.state()["topics"]["settings"]["claims"][0]["text"],
+        original
+    );
+    assert_eq!(f.state()["summary"], original);
+    for binding in fs::read_dir(f.root().join("memory/thread-agents")).unwrap() {
+        let binding: Value =
+            serde_json::from_slice(&fs::read(binding.unwrap().path()).unwrap()).unwrap();
+        let preview = binding["memory"].as_str().unwrap();
+        assert_eq!(preview.chars().count(), 2000);
+        assert!(preview.contains("Preview truncated"));
+    }
+    assert_eq!(success(f.run())["model_calls"], 0);
+}
+
+#[test]
+fn stored_facts_have_no_presentation_count_limit() {
+    let f = Fixture::new();
+    f.message("rules", "Keep all twenty five requirements");
+    let mut response = reply("rules", "All requirements retained");
+    let mut patch: Value =
+        serde_json::from_str(response["final_message"].as_str().unwrap()).unwrap();
+    patch["updates"][0]["claims"] = json!((0..25).map(|i| json!({"id":format!("rule-{i}"),"kind":"requirement","status":"requested","text":format!("Requirement {i}"),"sources":[eid("rules")]})).collect::<Vec<_>>());
+    response["final_message"] = json!(patch.to_string());
+    f.scenario(vec![response]);
+    assert_eq!(success(f.run())["model_calls"], 1);
+    assert_eq!(
+        f.state()["topics"]["settings"]["claims"]
+            .as_array()
+            .unwrap()
+            .len(),
+        25
+    );
+    assert_eq!(success(f.run())["model_calls"], 0);
+    f.message("metadata", "The requirements are still current");
+    f.scenario(vec![json!({"final_message":json!({"summary":"All requirements retained","updates":[{"key":"settings","title":"Settings","memory":"Rules remain current","operations":[],"related":[]}]}).to_string()})]);
+    success(f.run());
+    assert_eq!(
+        f.state()["topics"]["settings"]["claims"]
+            .as_array()
+            .unwrap()
+            .len(),
+        25
+    );
+}
+
+#[test]
+fn validation_retry_receives_previous_proposal() {
+    let f = Fixture::new();
+    f.message("rule", "Keep the rule");
+    let mut invalid = reply("rule", "Preserved detail");
+    let text = invalid["final_message"]
+        .as_str()
+        .unwrap()
+        .replace("settings", "INVALID_KEY");
+    invalid["final_message"] = json!(text);
+    let mut repaired = reply("rule", "Preserved detail");
+    repaired["expect_prompt_contains"] = json!([
+        "Previous validation error: invalid session topic",
+        "INVALID_KEY",
+        "Preserved detail",
+        "repair only invalid parts"
+    ]);
+    f.scenario(vec![invalid, repaired]);
+    assert_eq!(success(f.run())["model_calls"], 2);
+}
+
+#[test]
+fn source_repair_identifies_claim_and_allowed_event_roles() {
+    let f = Fixture::new();
+    f.message("rule", "Keep the rule");
+    let invalid = reply("missing", "Preserved detail");
+    let mut second = invalid.clone();
+    second["expect_prompt_contains"] = json!([
+        "claims[0].sources[0]",
+        "ID was not supplied",
+        "allowed_sources",
+        eid("rule"),
+        "invalid_proposal_detail",
+        "Preserved detail",
+        "new_user_evidence"
+    ]);
+    let mut repaired = reply("rule", "Preserved detail");
+    repaired["expect_prompt_contains"] = second["expect_prompt_contains"].clone();
+    f.scenario(vec![invalid, second, repaired]);
+    let result = success(f.run());
+    assert_eq!(result["model_calls"], 3);
+    assert_eq!(result["revision"], 1);
+}
+
+fn split_reply(id: &str) -> Value {
+    let mut response = reply(id, &format!("Rule for {id}"));
+    let mut patch: Value =
+        serde_json::from_str(response["final_message"].as_str().unwrap()).unwrap();
+    patch["updates"][0]["key"] = json!(format!("topic-{id}"));
+    response["final_message"] = json!(patch.to_string());
+    response
+}
+
+#[test]
+fn split_tail_survives_restart_and_publication_recovery_without_rollout() {
+    for recovery_stage in 0..3 {
+        let f = Fixture::new();
+        for id in ["a", "b", "c", "d"] {
+            f.message(id, &format!("Rule for {id}"));
+        }
+        let invalid = reply("missing", "Invalid");
+        f.scenario(vec![
+            invalid.clone(),
+            invalid.clone(),
+            invalid,
+            split_reply("a"),
+            json!({"exit_code":1,"stderr":"provider unavailable"}),
+        ]);
+        let failed = f.run();
+        assert!(!failed.status.success());
+        let receipt: Value = serde_json::from_slice(&failed.stdout).unwrap();
+        assert_eq!(receipt["write_receipt"]["status"], "partially_saved");
+        let before = f.state();
+        assert_eq!(before["revision"], 1);
+        assert!(before["topics"].get("topic-a").is_some());
+        let parent = f.state_path().parent().unwrap().to_path_buf();
+        let queue: Value =
+            serde_json::from_slice(&fs::read(parent.join("queued.json")).unwrap()).unwrap();
+        assert_eq!(queue["events"][0]["id"], eid("c"));
+        assert_eq!(queue["prior_events"].as_array().unwrap().len(), 2);
+        // Simulate a crash after state publication but before queue replacement.
+        if recovery_stage > 0 {
+            fs::copy(
+                parent.join("revisions/00000001.json"),
+                parent.join("pending.json"),
+            )
+            .unwrap();
+            fs::write(parent.join("queued.json"), "incomplete queue replacement").unwrap();
+            if recovery_stage == 2 {
+                fs::remove_file(f.state_path()).unwrap();
+            }
+        } else {
+            let mut damaged = queue.clone();
+            damaged["events"].as_array_mut().unwrap().pop();
+            fs::write(parent.join("queued.json"), damaged.to_string()).unwrap();
+            let rejected = f.run();
+            assert!(!rejected.status.success());
+            assert!(String::from_utf8_lossy(&rejected.stderr).contains("does not cover"));
+            assert_eq!(f.state(), before);
+            fs::write(parent.join("queued.json"), queue.to_string()).unwrap();
+        }
+        fs::remove_file(&f.log).unwrap();
+        let mut last = split_reply("c");
+        last["save_prompt_to"] = json!(f.root().join("split-prompt.txt"));
+        last["expect_prompt_contains"] = json!([
+            "previous_split_events",
+            "already processed",
+            "Rule for a",
+            "Rule for b"
+        ]);
+        f.scenario(vec![last]);
+        let result = success(f.run());
+        assert_eq!(result["new_events"], 2);
+        assert_eq!(result["model_calls"], 1);
+        assert_eq!(result["revision"], 2);
+        let state = f.state();
+        assert_eq!(state["topics"]["topic-a"], before["topics"]["topic-a"]);
+        assert!(state["topics"].get("topic-c").is_some());
+        assert_eq!(state["seen"].as_array().unwrap().len(), 4);
+        assert!(!parent.join("queued.json").exists());
+        assert!(!parent.join("pending.json").exists());
+        let prompt = fs::read_to_string(f.root().join("split-prompt.txt")).unwrap();
+        let input: Value =
+            serde_json::from_str(prompt.lines().find(|line| line.starts_with('{')).unwrap())
+                .unwrap();
+        assert_eq!(input["new_events"].as_array().unwrap().len(), 2);
+        assert_eq!(input["new_events"][0]["id"], eid("c"));
+        assert_eq!(input["previous_split_events"][0]["id"], eid("a"));
+    }
+}
+
+#[test]
+fn recursive_splitting_stops_at_single_event_and_retains_the_tail() {
+    let f = Fixture::new();
+    for id in ["a", "b", "c", "d"] {
+        f.message(id, &format!("Rule for {id}"));
+    }
+    f.scenario(vec![reply("missing", "Invalid"); 9]);
+    let failed = f.run();
+    assert!(!failed.status.success());
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        error.contains("single-event session batch blocked"),
+        "{error}"
+    );
+    assert!(error.contains("claims[0].sources[0]"), "{error}");
+    assert!(!f.state_path().exists());
+    let queue: Value =
+        serde_json::from_slice(&fs::read(f.state_path().with_file_name("queued.json")).unwrap())
+            .unwrap();
+    assert_eq!(queue["events"].as_array().unwrap().len(), 1);
+    assert_eq!(queue["events"][0]["id"], eid("a"));
+    assert_eq!(queue["remaining_parts"][0][0]["id"], eid("b"));
+    assert_eq!(queue["remaining_parts"][1].as_array().unwrap().len(), 2);
+    assert!(queue["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("ID was not supplied"));
+    fs::remove_file(&f.log).unwrap();
+    f.scenario(vec![split_reply("a"), split_reply("b"), split_reply("c")]);
+    let recovered = success(f.run());
+    assert_eq!(recovered["new_events"], 4);
+    assert_eq!(recovered["model_calls"], 3);
+    assert_eq!(recovered["revision"], 3);
+}
+
+#[test]
+fn small_batches_checkpoint_before_later_failure() {
+    let f = Fixture::new();
+    for i in 0..20 {
+        f.message(&format!("event-{i:02}"), "Keep this requirement");
+    }
+    f.scenario(vec![
+        reply("event-00", "Keep this requirement"),
+        json!({"exit_code":1,"stderr":"provider unavailable"}),
+    ]);
+    assert!(!f.run().status.success());
+    assert_eq!(f.state()["seen"].as_array().unwrap().len(), 16);
+    assert!(f
+        .state_path()
+        .parent()
+        .unwrap()
+        .join("queued.json")
+        .exists());
+    f.scenario(vec![
+        json!({"final_message":json!({"summary":"","updates":[]}).to_string()}),
+    ]);
+    success(f.run());
+    assert_eq!(f.state()["seen"].as_array().unwrap().len(), 20);
+    assert_eq!(success(f.run())["model_calls"], 0);
+}
+
+#[test]
 fn node_test_summaries_survive_import_and_incremental_failure() {
     let f = Fixture::new();
     f.message("request", "Verify Save");
@@ -339,6 +594,7 @@ fn failed_validation_retains_checkpoint_and_pending_commit_recovers() {
     let f = Fixture::new();
     f.message("a", "Save green");
     f.scenario(vec![
+        reply("missing", "Invalid"),
         reply("missing", "Invalid"),
         reply("missing", "Invalid"),
     ]);
@@ -732,7 +988,7 @@ fn omitted_requirement_retries_without_advancing_failed_checkpoint() {
     let mut body: Value = serde_json::from_str(invalid["final_message"].as_str().unwrap()).unwrap();
     body["updates"][0]["claims"][0]["id"] = json!("lost-old-id");
     invalid["final_message"] = json!(body.to_string());
-    f.scenario(vec![invalid.clone(), invalid.clone()]);
+    f.scenario(vec![invalid.clone(), invalid.clone(), invalid.clone()]);
     let failed = f.run();
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("disappeared"));
@@ -814,7 +1070,7 @@ fn twenty_imports_preserve_archive_without_resending_it() {
 fn write_receipt_is_committed_evidence_not_just_exit_success() {
     let f = Fixture::new();
     f.message("a", "Save green");
-    f.scenario(vec![reply("missing", "bad"), reply("missing", "bad")]);
+    f.scenario(vec![reply("missing", "bad"); 3]);
     let failed = f.run();
     assert!(!failed.status.success());
     let error: Value = serde_json::from_slice(&failed.stdout).unwrap();
@@ -908,7 +1164,10 @@ fn durable_failed_batch_replays_without_rollout_and_never_duplicates() {
 fn unified_index_reuses_current_claim_identity_and_original_addresses() {
     let f = Fixture::new();
     f.message("new-rule", "Save button must be green.");
-    f.scenario(vec![reply("new-rule", "Save button must be green.")]);
+    f.scenario(vec![reply(
+        "new-rule",
+        &format!("Save button must be green. {}", "Full detail ".repeat(900)),
+    )]);
     success(f.run());
     let before = fs::read(f.state_path()).unwrap();
     let path = f.root().join("memory/config.json");
@@ -948,4 +1207,81 @@ fn unified_index_reuses_current_claim_identity_and_original_addresses() {
         .unwrap();
     assert_eq!(&thread["elements"][0], claim);
     assert_eq!(fs::read(f.state_path()).unwrap(), before);
+}
+
+#[test]
+fn selective_ingestion_loads_only_requested_topics_and_preserves_others() {
+    let f = Fixture::new();
+    f.message("seed", "Keep nine independent rules");
+    let topics: Vec<_> = (0..9).map(|i| json!({"key":format!("topic-{i}"),"title":format!("Topic {i}"),"memory":format!("Summary {i}"),"related":[],"claims":[{"id":format!("rule-{i}"),"kind":"requirement","status":"requested","text":format!("Full private rule {i}"),"sources":[eid("seed")]}]})).collect();
+    f.scenario(vec![json!({"final_message":json!({"summary":"Nine independent rules","updates":topics}).to_string()})]);
+    success(f.run());
+    let before = f.state();
+    f.message("addition", "Add a second condition to topic 8");
+    let request = json!({"summary":"","updates":[],"context_request":{"topics":["topic-8"],"catalog_page":0}});
+    let update = json!({"summary":"Nine rules plus a second condition for topic 8","updates":[{"key":"topic-8","title":"Topic 8","memory":"Rule and added condition","related":[],"operations":[{"action":"add","claim":{"id":"added","kind":"requirement","status":"requested","text":"Second condition","sources":[eid("addition")]}}]}],"context_request":null});
+    f.scenario(vec![json!({"final_message":request.to_string(),"save_prompt_to":f.root().join("catalog-prompt.txt")}),json!({"final_message":update.to_string(),"save_prompt_to":f.root().join("selected-prompt.txt")})]);
+    assert_eq!(success(f.run())["model_calls"], 2);
+    let input = |name: &str| -> Value {
+        let prompt = fs::read_to_string(f.root().join(name)).unwrap();
+        serde_json::from_str(prompt.lines().find(|l| l.starts_with('{')).unwrap()).unwrap()
+    };
+    let catalog = input("catalog-prompt.txt");
+    assert_eq!(catalog["topics"], json!({}));
+    assert_eq!(catalog["topic_catalog"]["total_topics"], 9);
+    assert!(!catalog.to_string().contains("Full private rule"));
+    let selected = input("selected-prompt.txt");
+    assert_eq!(selected["topics"].as_object().unwrap().len(), 1);
+    assert_eq!(
+        selected["topics"]["topic-8"]["claims"][0]["text"],
+        "Full private rule 8"
+    );
+    let after = f.state();
+    for i in 0..8 {
+        let key = format!("topic-{i}");
+        assert_eq!(before["topics"][&key], after["topics"][&key]);
+    }
+    assert_eq!(
+        after["topics"]["topic-8"]["claims"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(success(f.run())["model_calls"], 0);
+
+    // A proposed update cannot use hidden facts just because the host has them.
+    f.message("bad", "Check rule zero");
+    let bad =
+        json!({"summary":"Invalid proposal","updates":[topics[0].clone()],"context_request":null});
+    f.scenario(vec![
+        json!({"final_message":bad.to_string()}),
+        json!({"final_message":bad.to_string()}),
+        json!({"final_message":bad.to_string()}),
+    ]);
+    let failed = f.run();
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("not loaded"));
+    assert_eq!(after, f.state());
+    assert!(f
+        .state_path()
+        .parent()
+        .unwrap()
+        .join("queued.json")
+        .exists());
+    f.scenario(vec![json!({"final_message":json!({"summary":"","updates":[],"context_request":{"topics":["topic-0"],"catalog_page":0}}).to_string()}),json!({"final_message":json!({"summary":"","updates":[],"context_request":null}).to_string()})]);
+    success(f.run());
+    let checkpoint = f.state();
+    f.message("loop", "Check both topics");
+    f.scenario((0..8).map(|i|json!({"final_message":json!({"summary":"","updates":[],"context_request":{"topics":[format!("topic-{}",i%2)],"catalog_page":0}}).to_string()})).collect());
+    let exhausted = f.run();
+    assert!(!exhausted.status.success());
+    assert!(String::from_utf8_lossy(&exhausted.stderr).contains("discovery call budget exhausted"));
+    assert_eq!(f.state(), checkpoint);
+    assert!(f
+        .state_path()
+        .parent()
+        .unwrap()
+        .join("queued.json")
+        .exists());
 }

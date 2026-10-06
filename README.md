@@ -112,11 +112,14 @@ cm -test_providers -pretty
 
 `cm init` creates missing memory files, updates the managed CM block in
 `AGENTS.md`, adds runtime/binary exclusions to `.gitignore`, and configures
-`mcp_servers.cm` in the project's `.codex/config.toml`.
+`mcp_servers.cm` in the project's `.codex/config.toml` and automatic
+history/context hooks in `.codex/hooks.json`.
 It preserves existing notes, reference documents and unrelated settings. An
 existing unmanaged MCP server named `cm` causes an error instead of being
 overwritten. Open or restart Codex in that project and trust its settings when
-prompted. Initialization does not install automatic history hooks.
+prompted, then review and trust the installed handlers in `/hooks` before they
+can run. Repeating `cm init` refreshes CM handlers without duplicating them or
+removing unrelated hooks, and reinstalls them if previously uninstalled.
 
 New installations include an OpenRouter provider and three agent profiles
 (`agent_low`, `agent_medium`, `agent_high`) using `z-ai/glm-5.3-flash` with low
@@ -143,7 +146,7 @@ use `.\cm.exe` in PowerShell or `./cm` on Unix, unless you have added it to `PAT
 | `cm` | Read questions interactively or from stdin; EOF ends input. |
 | `cm "@context:ID <follow-up>"` | Continue the returned `context_session`. |
 | `cm "@context:ID @details"` | Expand saved evidence and interpretations for that topic. |
-| `cm init` | Initialize memory and project MCP/instructions. |
+| `cm init` | Initialize memory, project MCP, automatic hooks and instructions. |
 | `cm help` | Show the public CLI help and version. |
 | `cm ingest-session` | Import new events from the identified Codex session. |
 | `cm docs build [--dry-run]` | Prepare document threads explicitly, or preview the pending files without model calls. |
@@ -435,9 +438,49 @@ run it again to check events appended since the batch was frozen.
 
 Selected content is sent to the configured provider. Credential masking is
 heuristic, not a guarantee. Extracted reports remain advisory rather than
-independent proof. Limits include 64 topics/session, 1200 characters per compact
-note, 16 MB per rollout line and 120000 characters per visible message; oversized
-input fails without silently consuming the batch.
+independent proof. Text targets are 1200 characters for the session summary,
+2000 for topic memory, 160 for titles and 400 for claim text/change reasons.
+These are presentation targets, not storage limits. A valid extraction is saved
+immediately without model calls to shorten it. Full claim text, identities and
+sources are retained; routing bindings use Unicode-safe previews capped at 2000
+characters with an explicit truncation marker. Retrieval selects source fragments
+within its own context budget. Stored topic and claim counts have no presentation
+cap; identity, provenance and requirement-retention checks remain mandatory.
+A validation retry receives the previous proposal, the invalid claim/field and
+the allowed source IDs with event roles. Up to two repairs target the invalid
+part while preserving valid facts and existing requirements.
+
+New batches contain at most 16 selected events and stop after reaching 12000
+characters (one event is never split). Each batch has its own durable checkpoint;
+a later failure preserves earlier commits. If bounded validation repairs fail,
+CM halves the queued batch and processes the parts in order. Successful parts
+and the remaining queue are journaled together, so restart does not repeat saved
+parts or require the original rollout. Earlier split events remain explicit
+context, not new user corrections. A failing single event blocks the remaining
+tail with its precise validation error; no event is silently skipped.
+Limits include 64 MB per state file, 16 MB
+per rollout line and 120000 characters per visible message; oversized input fails
+without silently consuming the batch. Provider failures leave the batch queued.
+Cancellation and forbidden tool use still abort ingestion.
+
+Import context is selected independently of durable storage. Sessions exceeding
+8 topics or 24000 serialized topic characters start with a discovery catalog
+(32 short previews per page, ranked against new events and recent context).
+The importer can request another page or full facts for selected topics. A request
+replaces the current selection; existing topics cannot be edited until loaded.
+Unselected topics and their evidence remain stored unchanged. Small sessions keep
+the single extraction call without a separate discovery round.
+
+Selected topics target 24000 characters and at most 8 topics per call. One larger
+topic is loaded intact; this is a soft context target, not a fact-storage cap.
+Previous evidence previews have a combined 8000-character budget, and the overview
+has a 2000-character preview with a truncation flag. Full original facts are never
+shortened for selection. Discovery and extraction share the ingestion deadline
+and a maximum of 8 calls per part, including up to two validation repairs.
+Validation/discovery exhaustion triggers splitting; timeouts leave the current
+part queued for retry. Audit entries record selection mode, loaded-topic count
+and input size. Topic selection is model-assisted; this does not prove semantic
+completeness, and a single very large topic still needs its full context.
 
 ## MCP and automatic hooks
 
@@ -448,7 +491,7 @@ initialization or ingestion as tools. Each request uses an isolated CM child;
 cancellation and deadlines terminate that child. If the executable moves, rerun
 `cm init` to update its registered path.
 
-Automatic hooks are opt-in:
+Automatic hooks are installed by `cm init`. They can also be managed separately:
 
 ```powershell
 cm hooks install codex
@@ -466,6 +509,33 @@ Hook failures report a diagnostic without forcing the coding agent to continue
 or abort. Queued imports are not confirmed saves; inspect their receipts under
 `memory/runtime/hooks/`. `hooks status` reports the queue, not installation/trust
 status. Hook lookups and imports can make model calls.
+
+Hook timing traces are written to `memory/runtime/hooks/timings/*.jsonl`, one
+file per invocation, even when statistics are disabled. Each stage records
+elapsed milliseconds before it begins; `handler_return` records success or failure.
+An interrupted trace identifies the last reached stage (project opening, queue,
+worker launch, context retrieval or statistics). Traces contain no prompt or
+answer text. These project traces start after stdin is parsed and the project
+is located. `handler_return` precedes writing the reply to stdout.
+
+Early lifecycle traces are also written to the OS temporary directory under
+`climemory-hook-startup/cm-*.jsonl`. They record entry into the hook handler,
+the wait for stdin EOF, JSON parsing, project discovery, stdout write/flush and
+return from the hook function, including malformed input failures. These files
+need no project configuration. The Windows PowerShell wrapper writes
+`wrapper-*.jsonl` in the same directory, recording entry, native process launch,
+native return with exit code, and wrapper exit preparation. Reinstall hooks
+with `cm hooks install codex` to update an existing Windows wrapper.
+
+Match `wrapper_id` across all three traces, or `pid` between native traces.
+A final `stdin_read` indicates waiting for EOF; `stdout_write` without
+`stdout_write_return` indicates an unfinished output write, while `stdout_flush`
+without `stdout_flush_return` indicates an unfinished flush. A completed native
+trace without `native_return` points to the wrapper/process boundary. Even
+`wrapper_exit` precedes actual PowerShell termination and does not prove the
+host received the response. Startup before PowerShell runs or before the native
+hook handler is entered cannot be logged by that process. Diagnostic write
+failures do not fail hooks. Old trace files may be deleted when no longer needed.
 
 The managed `AGENTS.md` policy tells the primary agent to reuse supplied evidence
 and query only for missing facts, contradictions or necessary freshness checks.

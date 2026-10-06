@@ -66,9 +66,9 @@ fn help() -> Result<()> {
         (
             "cm init",
             crate::ui::tr(
-                "Initialize memory, project MCP and instructions",
-                "Инициализировать память, MCP и инструкции проекта",
-                "初始化记忆、项目 MCP 和指令",
+                "Initialize memory, project MCP, automatic hooks and instructions",
+                "Инициализировать память, MCP, автоматические хуки и инструкции проекта",
+                "初始化记忆、项目 MCP、自动钩子和指令",
             ),
         ),
         (
@@ -192,6 +192,7 @@ fn initialize() -> Result<()> {
     }
     let root = std::env::current_dir()?;
     crate::mcp::preflight(&root)?;
+    crate::hooks::preflight(&root)?;
     let p = words(vec!["init".into(), root.to_string_lossy().into()]);
     crate::output::capture(|| crate::memory_app::init(&p))?;
     let path = root.join("AGENTS.md");
@@ -216,12 +217,13 @@ fn initialize() -> Result<()> {
         .as_bytes(),
     )?;
     crate::mcp::configure(&root)?;
+    crate::hooks::configure(&root, true)?;
     println!(
         "{}",
         crate::ui::tr(
-            "CM initialized. Codex MCP and AGENTS.md configured for this project. Open/restart Codex here; trust project settings if prompted. Model/provider access still requires configured credentials. CLI: cm <message>.",
-            "CM инициализирован. MCP Codex и AGENTS.md настроены для проекта. Откройте/перезапустите Codex здесь; при запросе подтвердите доверие проекту. Для моделей нужны настроенные учётные данные. CLI: cm <сообщение>.",
-            "CM 已初始化。已为项目配置 Codex MCP 和 AGENTS.md。请在此打开或重启 Codex，并按提示信任项目设置。模型访问仍需配置凭据。CLI：cm <消息>。"
+            "CM initialized. Codex MCP, automatic history/context hooks and AGENTS.md configured for this project. Open/restart Codex here; trust project settings if prompted and review/trust hooks in /hooks before they can run. Model/provider access still requires configured credentials. CLI: cm <message>.",
+            "CM инициализирован. MCP Codex, автоматические хуки истории/контекста и AGENTS.md настроены для проекта. Откройте/перезапустите Codex здесь; при запросе подтвердите доверие проекту и проверьте/разрешите хуки через /hooks для их запуска. Для моделей нужны настроенные учётные данные. CLI: cm <сообщение>.",
+            "CM 已初始化。已为项目配置 Codex MCP、自动历史/上下文钩子和 AGENTS.md。请在此打开或重启 Codex，按提示信任项目设置，并在 /hooks 中审核并信任钩子后运行。模型访问仍需配置凭据。CLI：cm <消息>。"
         )
     );
     Ok(())

@@ -81,6 +81,174 @@ fn patch(state: &State) -> Patch {
     }
 }
 
+fn selective_setup() -> (State, BTreeMap<String, Event>, BTreeSet<String>) {
+    let (mut state, _, fresh) = setup();
+    let mut hidden = state.topics["settings"].clone();
+    hidden.key = "hidden".into();
+    hidden.memory = "x".repeat(25_000);
+    hidden.claims = vec![claim("hidden-claim", "Keep unrelated evidence")];
+    hidden.claims[0].sources = vec!["hidden-source".into()];
+    state.topics.insert(hidden.key.clone(), hidden);
+    state
+        .evidence
+        .insert("hidden-source".into(), event("hidden-source", "user"));
+    let events = vec![event("correction", "user")];
+    let mut context = context::Context::new(&state, &events);
+    assert!(context.selective);
+    context.response(&state, &json!({"summary":"","updates":[],"context_request":{"topics":["settings"],"catalog_page":0}}).to_string()).unwrap();
+    let (_, supplied) = context.input(&state, &events);
+    assert!(!supplied.contains_key("hidden-source"));
+    (state, supplied, fresh)
+}
+
+#[test]
+fn selective_update_preserves_unloaded_sources_and_archived_evidence() {
+    for archive_hidden in [false, true] {
+        let (mut state, mut supplied, fresh) = selective_setup();
+        let original_before = serde_json::to_value(&state.evidence["original"]).unwrap();
+        supplied.get_mut("original").unwrap().text = "truncated preview".into();
+        if archive_hidden {
+            state.topics.get_mut("hidden").unwrap().claims[0].status = "superseded".into();
+        }
+        let hidden_before = serde_json::to_value(&state.topics["hidden"]).unwrap();
+        let source_before = serde_json::to_value(&state.evidence["hidden-source"]).unwrap();
+        let mut updated = state.topics["settings"].clone();
+        let mut added = claim("new-claim", "A new requirement");
+        added.sources = vec!["correction".into()];
+        updated.claims.push(added);
+        apply(
+            &mut state,
+            Patch {
+                summary: "Updated rules".into(),
+                updates: vec![updated],
+            },
+            &supplied,
+            &fresh,
+        )
+        .unwrap();
+        assert!(state.evidence.contains_key("original"));
+        assert_eq!(
+            serde_json::to_value(&state.evidence["original"]).unwrap(),
+            original_before
+        );
+        assert!(state.evidence.contains_key("correction"));
+        if archive_hidden {
+            assert!(state.topics["hidden"].claims.is_empty());
+            assert!(!state.evidence.contains_key("hidden-source"));
+            assert_eq!(
+                serde_json::to_value(&state.archive["hidden"][0].evidence["hidden-source"])
+                    .unwrap(),
+                source_before
+            );
+        } else {
+            assert_eq!(
+                serde_json::to_value(&state.topics["hidden"]).unwrap(),
+                hidden_before
+            );
+            assert_eq!(
+                serde_json::to_value(&state.evidence["hidden-source"]).unwrap(),
+                source_before
+            );
+        }
+        validate_state(&state, "test").unwrap();
+    }
+}
+
+#[test]
+fn selective_update_missing_retained_source_leaves_state_unchanged() {
+    let (mut state, supplied, fresh) = selective_setup();
+    state.evidence.remove("hidden-source");
+    let before = serde_json::to_value(&state).unwrap();
+    let update = Patch {
+        summary: "Updated rules".into(),
+        updates: vec![state.topics["settings"].clone()],
+    };
+    let error = apply(&mut state, update, &supplied, &fresh).unwrap_err();
+    assert!(error.msg.contains("source is missing"));
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+}
+
+#[test]
+fn selective_update_cannot_cite_unloaded_evidence() {
+    let (mut state, supplied, fresh) = selective_setup();
+    let before = serde_json::to_value(&state).unwrap();
+    let mut updated = state.topics["settings"].clone();
+    let mut added = claim("new-claim", "An unsupported requirement");
+    added.sources = vec!["hidden-source".into()];
+    updated.claims.push(added);
+    let error = apply(
+        &mut state,
+        Patch {
+            summary: "Updated rules".into(),
+            updates: vec![updated],
+        },
+        &supplied,
+        &fresh,
+    )
+    .unwrap_err();
+    assert!(error.msg.contains("source provenance"));
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+}
+
+#[test]
+fn saved_topic_memory_can_exceed_soft_limits() {
+    let (mut state, supplied, fresh) = setup();
+    let mut update = patch(&state);
+    update.updates[0].memory = "я".repeat(2001);
+    apply(&mut state, update, &supplied, &fresh).unwrap();
+    assert_eq!(state.topics["settings"].memory.chars().count(), 2001);
+    validate_state(&state, "test").unwrap();
+    assert!(
+        schema(&BTreeSet::new())["properties"]["updates"]["items"]["properties"]["memory"]
+            .get("maxLength")
+            .is_none()
+    );
+    assert_eq!(
+        memory_preview(&state.topics["settings"].memory)
+            .chars()
+            .count(),
+        2000
+    );
+    assert!(memory_preview(&state.topics["settings"].memory).contains("Preview truncated"));
+}
+
+#[test]
+fn invalid_topics_report_field_and_limit_without_leaking_text() {
+    for (variant, expected) in [
+        (0, "key: 0 bytes; expected 1..=60"),
+        (1, "key: 61 bytes; expected 1..=60"),
+        (2, "key: reserved value root"),
+        (
+            3,
+            "key: expected only lowercase ASCII letters, digits or hyphens",
+        ),
+        (4, "title: empty or whitespace-only text"),
+        (6, "title: contains forbidden control characters"),
+        (8, "memory: contains forbidden control characters"),
+    ] {
+        let (mut state, supplied, fresh) = setup();
+        let before = serde_json::to_value(&state).unwrap();
+        let mut update = patch(&state);
+        let topic = &mut update.updates[0];
+        match variant {
+            0 => topic.key.clear(),
+            1 => topic.key = "x".repeat(61),
+            2 => topic.key = "root".into(),
+            3 => topic.key = "PRIVATE_VALUE".into(),
+            4 => topic.title = " ".into(),
+            6 => topic.title = "PRIVATE\nVALUE".into(),
+            8 => topic.memory = "PRIVATE\0VALUE".into(),
+            _ => unreachable!(),
+        }
+        let error = apply(&mut state, update, &supplied, &fresh).unwrap_err();
+        assert_eq!(
+            error.msg,
+            format!("invalid session topic updates[0].{expected}")
+        );
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    }
+}
+
 #[test]
 fn missing_or_disguised_requirements_are_rejected_atomically() {
     for variant in 0..7 {

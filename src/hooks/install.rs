@@ -3,28 +3,33 @@ use super::*;
 const LABEL: &str = "Climemory automatic memory";
 const EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"];
 
-pub(super) fn configure(enable: bool) -> Result<()> {
-    let root = crate::chat::project_root()?;
+fn read(path: &Path) -> Result<Value> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(json!({})),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn preflight(root: &Path) -> Result<()> {
+    let path = root.join(".codex/hooks.json");
+    Project::checked_path(root, &path)?;
+    update(&mut read(&path)?, &std::env::current_exe()?, true)
+}
+
+pub(crate) fn configure(root: &Path, enable: bool) -> Result<PathBuf> {
     let dir = root.join(".codex");
-    Project::checked_path(&root, &dir)?;
+    Project::checked_path(root, &dir)?;
     fs::create_dir_all(&dir)?;
     let path = checked(&dir, "hooks.json")?;
     let _lock = FileLock::acquire(
         &checked(&dir, "climemory-install.lock")?,
         Duration::from_secs(2),
     )?;
-    let mut config: Value = if path.exists() {
-        serde_json::from_slice(&fs::read(&path)?)?
-    } else {
-        json!({})
-    };
+    let mut config = read(&path)?;
     update(&mut config, &std::env::current_exe()?, enable)?;
     atomic_write(&path, &serde_json::to_vec_pretty(&config)?)?;
-    println!(
-        "{}",
-        json!({"status":if enable {"installed"} else {"uninstalled"},"path":path,"note":"Codex must trust project hooks before running them. Existing hooks were preserved."})
-    );
-    Ok(())
+    Ok(path)
 }
 
 fn update(config: &mut Value, exe: &Path, enable: bool) -> Result<()> {
@@ -45,7 +50,8 @@ fn update(config: &mut Value, exe: &Path, enable: bool) -> Result<()> {
         exe.to_owned()
     };
     let command = format!("'{}' hooks codex", shell_path.replace('\'', "'\"'\"'"));
-    let windows = format!("& '{}' hooks codex", exe.replace('\'', "''"));
+    let windows =
+        include_str!("windows-wrapper.ps1").replace("__CM_EXECUTABLE__", &exe.replace('\'', "''"));
     let encoded = base64(
         &windows
             .encode_utf16()
@@ -69,10 +75,13 @@ fn update(config: &mut Value, exe: &Path, enable: bool) -> Result<()> {
             true
         });
         if enable {
-            groups.push(json!({"hooks":[{"type":"command","command":command,
+            let mut handler = json!({"type":"command","command":command,
                 "commandWindows":format!("powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"),
-                "statusMessage":LABEL,"timeout":if *event == "UserPromptSubmit" {120} else {10},
-                "additionalContextLimit":2500}]}));
+                "statusMessage":LABEL,"timeout":if *event == "UserPromptSubmit" {120} else {10}});
+            if matches!(*event, "SessionStart" | "UserPromptSubmit") {
+                handler["additionalContextLimit"] = json!(2500);
+            }
+            groups.push(json!({"hooks":[handler]}));
         }
     }
     Ok(())

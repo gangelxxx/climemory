@@ -1,5 +1,6 @@
 //! Codex lifecycle adapter. Queue before spawning; acknowledge only completed imports.
 mod install;
+pub(crate) use install::{configure, preflight};
 
 use crate::{project::Project, util::*};
 use serde::{Deserialize, Serialize};
@@ -7,10 +8,10 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const MAX_INPUT: u64 = 1_000_000;
@@ -61,8 +62,15 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["install", "codex"] => install::configure(true),
-        ["uninstall", "codex"] => install::configure(false),
+        [action @ ("install" | "uninstall"), "codex"] => {
+            let enable = *action == "install";
+            let path = configure(&crate::chat::project_root()?, enable)?;
+            println!(
+                "{}",
+                json!({"status":if enable {"installed"} else {"uninstalled"},"path":path,"note":"Codex must trust project hooks before running them. Existing hooks were preserved."})
+            );
+            Ok(())
+        }
         ["drain"] => drain(&Project::open(&crate::chat::project_root()?)?),
         ["status"] => {
             let project = Project::open(&crate::chat::project_root()?)?;
@@ -76,14 +84,27 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         }
         ["codex"] => {
             // Hook failures must never force the coding agent to continue or abort.
-            let result = handle_stdin();
-            match result {
-                Ok(value) => println!("{value}"),
-                Err(error) => println!(
-                    "{}",
+            let mut lifecycle = Timing::startup();
+            let result = handle_stdin(&mut lifecycle);
+            lifecycle.record("handler_return", Some(result.is_ok()));
+            let value = match result {
+                Ok(value) => value,
+                Err(error) => {
                     json!({"systemMessage":format!("CM memory hook failed; work can continue: {}", error.msg)})
-                ),
+                }
+            };
+            lifecycle.record("stdout_write", None);
+            {
+                let mut stdout = io::stdout().lock();
+                let written = writeln!(stdout, "{value}");
+                lifecycle.record("stdout_write_return", Some(written.is_ok()));
+                written?;
+                lifecycle.record("stdout_flush", None);
+                let flushed = stdout.flush();
+                lifecycle.record("stdout_flush_return", Some(flushed.is_ok()));
+                flushed?;
             }
+            lifecycle.record("hook_run_return", Some(true));
             Ok(())
         }
         _ => Err(AppError::new(
@@ -92,13 +113,18 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     }
 }
 
-fn handle_stdin() -> Result<Value> {
+fn handle_stdin(lifecycle: &mut Timing) -> Result<Value> {
+    let started = Instant::now();
     let mut bytes = Vec::new();
+    lifecycle.record("stdin_read", None);
     io::stdin().take(MAX_INPUT + 1).read_to_end(&mut bytes)?;
+    lifecycle.record("stdin_read_return", Some(true));
     if bytes.len() as u64 > MAX_INPUT {
         return Err(AppError::new("hook input exceeds 1 MB"));
     }
+    lifecycle.record("input_parse", None);
     let input: Input = serde_json::from_slice(&bytes)?;
+    lifecycle.record("input_parse_return", Some(true));
     if input.agent_id.is_some() {
         return Ok(json!({}));
     }
@@ -110,6 +136,7 @@ fn handle_stdin() -> Result<Value> {
     }
     validate_session(&input.session_id)?;
     // Never use the executable's project as a fallback for an unrelated cwd.
+    lifecycle.record("project_locate", None);
     let cwd = fs::canonicalize(&input.cwd)?;
     let Some(root) = cwd
         .ancestors()
@@ -117,14 +144,82 @@ fn handle_stdin() -> Result<Value> {
     else {
         return Ok(json!({}));
     };
-    let project = Project::open(root)?;
-    crate::session_ingest::with_hook_session(&input.session_id, || {
-        measured(&project, &input.session_id, &input.hook_event_name, || {
-            crate::statistics::input(input.prompt.as_deref().unwrap_or(""));
-            crate::statistics::event("hook_turn", json!({"turn_id": input.turn_id}));
-            handle(&project, &input)
+    lifecycle.record("project_locate_return", Some(true));
+    let mut timing = Timing::new(root, &input, started);
+    timing.record("input_read", None);
+    timing.record("project_open", None);
+    let result = (|| {
+        let project = Project::open(root)?;
+        timing.record("statistics_begin", None);
+        crate::session_ingest::with_hook_session(&input.session_id, || {
+            measured(&project, &input.session_id, &input.hook_event_name, || {
+                crate::statistics::input(input.prompt.as_deref().unwrap_or(""));
+                crate::statistics::event("hook_turn", json!({"turn_id": input.turn_id}));
+                let result = handle(&project, &input, &mut timing);
+                timing.record("statistics_finish", None);
+                result
+            })
         })
-    })
+    })();
+    timing.record("handler_return", Some(result.is_ok()));
+    result
+}
+
+// Independent of optional statistics. Persist each stage before entering it, so
+// termination by the host leaves the last reached stage. Never log user content
+// or make a diagnostic write failure prevent the hook from running.
+struct Timing {
+    file: Option<fs::File>,
+    started: Instant,
+}
+
+impl Timing {
+    fn startup() -> Self {
+        let started = Instant::now();
+        let file = (|| -> Result<fs::File> {
+            let temp = std::env::temp_dir();
+            let dir = temp.join("climemory-hook-startup");
+            Project::checked_path(&temp, &dir)?;
+            fs::create_dir_all(&dir)?;
+            let path = dir.join(format!("cm-{}.jsonl", fresh_id()));
+            let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+            writeln!(file, "{}", json!({"kind":"cm_lifecycle","pid":std::process::id(),"started_at":iso_now(),"wrapper_id":wrapper_id()}))?;
+            Ok(file)
+        })().ok();
+        let mut timing = Self { file, started };
+        timing.record("hook_run_enter", None);
+        timing
+    }
+
+    fn new(root: &Path, input: &Input, started: Instant) -> Self {
+        let file = (|| -> Result<fs::File> {
+            let data = root.join("memory");
+            let dir = data.join("runtime/hooks/timings");
+            Project::checked_path(root, &dir)?;
+            fs::create_dir_all(&dir)?;
+            let path = dir.join(format!("{}.jsonl", fresh_id()));
+            let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+            writeln!(file, "{}", json!({"event":input.hook_event_name,"session_id":input.session_id,"started_at":iso_now(),"pid":std::process::id(),"wrapper_id":wrapper_id()}))?;
+            Ok(file)
+        })().ok();
+        Self { file, started }
+    }
+
+    fn record(&mut self, stage: &str, success: Option<bool>) {
+        if let Some(file) = &mut self.file {
+            let _ = writeln!(
+                file,
+                "{}",
+                json!({"stage":stage,"elapsed_ms":self.started.elapsed().as_millis(),"success":success})
+            );
+        }
+    }
+}
+
+fn wrapper_id() -> Option<String> {
+    std::env::var("CM_HOOK_WRAPPER_ID")
+        .ok()
+        .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn measured(
@@ -150,9 +245,11 @@ fn measured(
     result
 }
 
-fn handle(project: &Project, input: &Input) -> Result<Value> {
+fn handle(project: &Project, input: &Input, timing: &mut Timing) -> Result<Value> {
+    timing.record("queue_open", None);
     let dir = storage(project)?;
     if matches!(input.hook_event_name.as_str(), "Stop" | "PreCompact") {
+        timing.record("enqueue", None);
         enqueue(
             project,
             &Job {
@@ -168,10 +265,14 @@ fn handle(project: &Project, input: &Input) -> Result<Value> {
             },
         )?;
     }
+    timing.record("queue_scan", None);
     if !jobs(&dir)?.is_empty() {
+        timing.record("worker_spawn", None);
         spawn_worker(project, &dir)?;
+        timing.record("worker_spawn_return", None);
     }
     if input.hook_event_name == "UserPromptSubmit" {
+        timing.record("context", None);
         return context(project, &dir, input);
     }
     if input.hook_event_name == "SessionStart" {

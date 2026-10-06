@@ -78,6 +78,224 @@ fn wait_for(mut condition: impl FnMut() -> bool) {
     }
 }
 
+fn startup_command(root: &Path) -> Command {
+    let mut c = command(root);
+    c.env("TMP", root).env("TEMP", root).env("TMPDIR", root);
+    c
+}
+
+fn startup_rows(root: &Path, prefix: &str) -> Vec<Value> {
+    let dir = root.join("climemory-hook-startup");
+    let Ok(files) = fs::read_dir(dir) else {
+        return vec![];
+    };
+    files
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[test]
+fn startup_trace_is_visible_while_stdin_is_still_open() {
+    let d = fixture();
+    let mut child = startup_command(d.path())
+        .args(["hooks", "codex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Always reap the child, including when a regression prevents the marker.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let visible = loop {
+        if startup_rows(d.path(), "cm-")
+            .iter()
+            .any(|r| r["stage"] == "stdin_read")
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let still_running = child.try_wait().unwrap().is_none();
+    let _ = child.kill();
+    child.wait().unwrap();
+    assert!(visible, "stdin wait must be logged before EOF");
+    assert!(still_running);
+    assert!(!d.path().join("memory/runtime/hooks").exists());
+}
+
+#[test]
+fn startup_trace_covers_invalid_input_and_stdout_flush() {
+    let d = fixture();
+    assert!(invoke(startup_command(d.path()), json!({}))["systemMessage"].is_string());
+    let rows = startup_rows(d.path(), "cm-");
+    assert!(rows
+        .iter()
+        .any(|r| r["stage"] == "handler_return" && r["success"] == false));
+    assert!(rows
+        .iter()
+        .any(|r| r["stage"] == "stdout_flush_return" && r["success"] == true));
+    assert_eq!(rows.last().unwrap()["stage"], "hook_run_return");
+}
+
+#[test]
+fn startup_trace_reports_closed_output_pipe() {
+    let d = fixture();
+    let mut child = startup_command(d.path())
+        .args(["hooks", "codex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    child.stdin.take().unwrap().write_all(b"{}").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let rows = startup_rows(d.path(), "cm-");
+    assert!(rows
+        .iter()
+        .any(|r| r["stage"] == "stdout_write_return" && r["success"] == false));
+    assert!(!rows.iter().any(|r| r["stage"] == "hook_run_return"));
+}
+
+#[test]
+fn timing_survives_disabled_statistics_and_project_open_errors_without_content() {
+    for invalid_config in [false, true] {
+        let d = fixture();
+        fs::write(
+            d.path().join("memory/config.json"),
+            if invalid_config {
+                "{".to_string()
+            } else {
+                json!({"memory":{"statistics":{"enabled":false}}}).to_string()
+            },
+        )
+        .unwrap();
+        let mut request = input(d.path(), "SessionStart");
+        request["prompt"] = json!("private prompt must not appear in timing logs");
+        let reply = hook(d.path(), request);
+        assert_eq!(reply["systemMessage"].is_string(), invalid_config);
+        let files = fs::read_dir(d.path().join("memory/runtime/hooks/timings"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        let text = fs::read_to_string(files[0].path()).unwrap();
+        assert!(!text.contains("private prompt"));
+        let rows = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows[0]["event"], "SessionStart");
+        assert_eq!(rows[0]["session_id"], SID);
+        assert_eq!(rows[1]["stage"], "input_read");
+        assert_eq!(rows[2]["stage"], "project_open");
+        assert_eq!(rows.last().unwrap()["stage"], "handler_return");
+        assert_eq!(rows.last().unwrap()["success"], !invalid_config);
+        for pair in rows[1..].windows(2) {
+            assert!(
+                pair[0]["elapsed_ms"].as_u64().unwrap() <= pair[1]["elapsed_ms"].as_u64().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn unavailable_timing_directory_does_not_break_hook() {
+    let d = fixture();
+    fs::create_dir_all(d.path().join("memory/runtime/hooks")).unwrap();
+    fs::write(d.path().join("memory/runtime/hooks/timings"), "occupied").unwrap();
+    fs::write(d.path().join("climemory-hook-startup"), "occupied").unwrap();
+    assert_eq!(
+        invoke(startup_command(d.path()), input(d.path(), "SessionStart"))["hookSpecificOutput"]
+            ["hookEventName"],
+        "SessionStart"
+    );
+}
+
+#[test]
+fn init_installs_all_hooks_and_preserves_existing_handlers_on_repeat() {
+    let d = fixture();
+    let path = d.path().join(".codex/hooks.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for event in ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"] {
+        assert_eq!(config["hooks"][event].as_array().unwrap().len(), 1);
+        let handler = &config["hooks"][event][0]["hooks"][0];
+        if matches!(event, "SessionStart" | "UserPromptSubmit") {
+            assert_eq!(handler["additionalContextLimit"], 2500);
+        } else {
+            assert!(handler.get("additionalContextLimit").is_none());
+            // Reinitialization must also repair configurations from older CM versions.
+            config["hooks"][event][0]["hooks"][0]["additionalContextLimit"] = json!(2500);
+        }
+    }
+    let other = json!({"type":"command","command":"echo keep"});
+    config["description"] = json!("user hooks");
+    config["hooks"]["Stop"][0]["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .push(other.clone());
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut previous = None;
+    for _ in 0..2 {
+        let output = command(d.path()).arg("init").output().unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let message = String::from_utf8(output.stdout).unwrap();
+        assert!(message.contains("/hooks"));
+        let bytes = fs::read(&path).unwrap();
+        if let Some(previous) = previous {
+            assert_eq!(bytes, previous);
+        }
+        previous = Some(bytes.clone());
+        let config: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(config["description"], "user hooks");
+        assert_eq!(config["hooks"]["Stop"][0]["hooks"], json!([other]));
+        for event in ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"] {
+            let handlers: Vec<_> = config["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .filter(|handler| handler["statusMessage"] == "Climemory automatic memory")
+                .collect();
+            assert_eq!(handlers.len(), 1);
+            if matches!(event, "Stop" | "PreCompact") {
+                assert!(handlers[0].get("additionalContextLimit").is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn init_rejects_invalid_hook_configuration_without_creating_memory() {
+    for invalid in ["{", "[]", r#"{"hooks":[]}"#, r#"{"hooks":{"Stop":{}}}"#] {
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join(".codex")).unwrap();
+        let path = d.path().join(".codex/hooks.json");
+        fs::write(&path, invalid).unwrap();
+        fs::write(d.path().join("AGENTS.md"), "User instructions\n").unwrap();
+        let output = command(d.path()).arg("init").output().unwrap();
+        assert!(!output.status.success());
+        assert_eq!(fs::read_to_string(path).unwrap(), invalid);
+        assert!(!d.path().join("memory").exists());
+        assert!(!d.path().join(".codex/config.toml").exists());
+        assert_eq!(
+            fs::read_to_string(d.path().join("AGENTS.md")).unwrap(),
+            "User instructions\n"
+        );
+    }
+}
+
 #[test]
 fn installed_hooks_preserve_config_and_execute_windows_command() {
     let d = fixture();
@@ -109,6 +327,9 @@ fn installed_hooks_preserve_config_and_execute_windows_command() {
         let mut c = Command::new("powershell.exe");
         c.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded])
             .current_dir(d.path())
+            .env("TMP", d.path())
+            .env("TEMP", d.path())
+            .env("TMPDIR", d.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -127,6 +348,25 @@ fn installed_hooks_preserve_config_and_execute_windows_command() {
         );
         let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(reply["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let wrapper = startup_rows(d.path(), "wrapper-");
+        assert_eq!(
+            wrapper
+                .iter()
+                .map(|r| r["stage"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "wrapper_enter",
+                "native_start",
+                "native_return",
+                "wrapper_exit"
+            ]
+        );
+        assert_eq!(wrapper.last().unwrap()["exit_code"], 0);
+        let native = startup_rows(d.path(), "cm-");
+        assert_eq!(native[0]["wrapper_id"], wrapper[0]["wrapper_id"]);
+        assert!(native
+            .iter()
+            .any(|r| r["stage"] == "stdout_flush_return" && r["success"] == true));
     }
     assert!(command(d.path())
         .args(["hooks", "uninstall", "codex"])
